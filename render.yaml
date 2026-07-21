@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: proofreader-agent
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: CEREBRAS_API_KEY
+        sync: false
+      - key: CEREBRAS_MODEL
+        value: llama-3.3-70b
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false

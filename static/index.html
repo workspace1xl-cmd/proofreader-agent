@@ -1,0 +1,933 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Proofreader — Mark it up</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90' font-family='Georgia'%3E%C2%B6%3C/text%3E%3C/svg%3E">
+<style>
+  :root{
+    --paper:#F4F2ED;
+    --card:#FFFFFF;
+    --ink:#1C1A17;
+    --ink-soft:#5B564C;
+    --ink-faint:#8A8578;
+    --pen:#A5372C;
+    --pen-bright:#C0402F;
+    --pen-soft:#F3E2DE;
+    --line:#D8D3C7;
+    --line-soft:#E8E4DA;
+    --ok:#3E6B4F;
+    --ok-soft:#E1EBE4;
+    --shadow:0 1px 3px rgba(28,26,23,.08), 0 8px 24px rgba(28,26,23,.06);
+  }
+  :root[data-theme="dark"]{
+    --paper:#211E1A;
+    --card:#2B2723;
+    --ink:#EDE9E0;
+    --ink-soft:#B5AEA0;
+    --ink-faint:#847D6F;
+    --pen:#E06A55;
+    --pen-bright:#EA7A64;
+    --pen-soft:#4A2E28;
+    --line:#4A453C;
+    --line-soft:#3A362F;
+    --ok:#8FBF9F;
+    --ok-soft:#2E3B32;
+    --shadow:0 1px 3px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.3);
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:Georgia, 'Times New Roman', serif;
+    transition:background .25s, color .25s;
+    min-height:100vh; display:flex; flex-direction:column;
+  }
+  .mono{ font-family:'Courier New', monospace; }
+
+  /* ---------- header ---------- */
+  header{
+    position:sticky; top:0; z-index:50;
+    background:color-mix(in srgb, var(--paper) 88%, transparent);
+    backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line);
+    padding:14px 24px;
+    display:flex; align-items:center; justify-content:space-between; gap:16px;
+  }
+  .brand{ display:flex; align-items:baseline; gap:10px; cursor:pointer; }
+  .brand .pilcrow{ color:var(--pen); font-size:26px; line-height:1; }
+  .brand h1{ font-size:19px; font-weight:400; margin:0; letter-spacing:.01em; }
+  .brand .tag{ font-family:'Courier New', monospace; font-size:11px; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--ink-faint); }
+  .header-actions{ display:flex; gap:10px; }
+
+  /* ---------- buttons ---------- */
+  button{
+    font-family:'Courier New', monospace; font-size:13px; letter-spacing:.04em;
+    text-transform:uppercase; cursor:pointer; border-radius:3px;
+    padding:9px 16px; transition:background .15s, color .15s, border-color .15s, transform .1s;
+    border:1px solid var(--line); background:var(--card); color:var(--ink);
+  }
+  button:hover{ border-color:var(--ink-soft); background:var(--line-soft); }
+  button:active{ transform:translateY(1px); }
+  button:focus-visible{ outline:2px solid var(--pen); outline-offset:2px; }
+  button.primary{ background:var(--pen); border-color:var(--pen); color:#fff; }
+  button.primary:hover{ background:var(--pen-bright); border-color:var(--pen-bright); }
+  button.danger{ background:transparent; border-color:var(--pen); color:var(--pen); }
+  button.danger:hover{ background:var(--pen-soft); }
+  button:disabled{ opacity:.5; cursor:wait; transform:none; }
+  button.icon-btn{ padding:8px 12px; font-size:14px; }
+
+  main{ flex:1; width:100%; max-width:1160px; margin:0 auto; padding:40px 24px 64px; }
+
+  /* ---------- editor view ---------- */
+  .hero{ max-width:760px; margin:0 auto 28px; text-align:center; }
+  .hero .eyebrow{
+    font-family:'Courier New', monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--pen); margin-bottom:10px;
+  }
+  .hero h2{ font-size:clamp(30px, 5vw, 44px); font-weight:400; margin:0 0 10px; line-height:1.15; }
+  .hero p{ color:var(--ink-soft); font-size:16px; margin:0; line-height:1.6; }
+
+  .editor-card{
+    max-width:760px; margin:0 auto; background:var(--card);
+    border:1px solid var(--line); border-radius:6px; box-shadow:var(--shadow);
+    position:relative; overflow:hidden;
+  }
+  .editor-toolbar{
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:12px 16px; border-bottom:1px solid var(--line-soft);
+  }
+  .editor-toolbar .spacer{ flex:1; }
+  textarea{
+    display:block; width:100%; min-height:260px; max-height:520px; padding:20px 22px;
+    font-size:16px; line-height:1.7; font-family:Georgia, serif;
+    color:var(--ink); background:transparent; border:none; resize:vertical;
+  }
+  textarea:focus{ outline:none; }
+  textarea::placeholder{ color:var(--ink-faint); font-style:italic; }
+  .editor-footer{
+    display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
+    padding:12px 16px; border-top:1px solid var(--line-soft);
+  }
+  .counts{ font-family:'Courier New', monospace; font-size:12px; color:var(--ink-faint); letter-spacing:.03em; }
+  .counts .over{ color:var(--pen); font-weight:bold; }
+  .drop-overlay{
+    position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+    background:color-mix(in srgb, var(--pen-soft) 82%, transparent);
+    border:2px dashed var(--pen); border-radius:6px; z-index:5;
+    font-family:'Courier New', monospace; text-transform:uppercase; letter-spacing:.1em;
+    color:var(--pen); font-size:14px; pointer-events:none;
+  }
+  .editor-card.dragging .drop-overlay{ display:flex; }
+
+  .field-error{ color:var(--pen); font-size:14px; margin-top:10px; display:none; text-align:left; }
+
+  /* ---------- progress ---------- */
+  .progress-wrap{ display:none; padding:26px 22px 30px; text-align:center; }
+  .progress-status{ font-family:'Courier New', monospace; font-size:13px; letter-spacing:.06em;
+    text-transform:uppercase; color:var(--ink-soft); margin-bottom:14px; min-height:18px; }
+  .progress-bar{ height:6px; background:var(--line-soft); border-radius:3px; overflow:hidden; }
+  .progress-fill{
+    height:100%; width:4%; background:var(--pen); border-radius:3px;
+    transition:width .4s ease;
+  }
+  .progress-fill.indeterminate{ animation:sweep 1.4s ease-in-out infinite; width:30%; }
+  @keyframes sweep{ 0%{margin-left:-30%;} 100%{margin-left:100%;} }
+
+  /* ---------- review view ---------- */
+  #review{ display:none; }
+  .review-top{ display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:8px; }
+  .review-top h2{ font-size:22px; font-weight:400; margin:0; flex:1; min-width:200px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .review-summary{ color:var(--ink-soft); font-style:italic; margin:0 0 22px; font-size:15px; }
+
+  .stats-row{
+    display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px;
+    margin-bottom:14px;
+  }
+  .stat-tile{
+    background:var(--card); border:1px solid var(--line); border-radius:6px;
+    padding:14px 16px 12px; box-shadow:var(--shadow);
+  }
+  .stat-tile .label{ font-family:'Courier New', monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--ink-faint); margin-bottom:6px; }
+  .stat-tile .value{ font-size:28px; line-height:1.1; }
+  .stat-tile .value small{ font-size:14px; color:var(--ink-soft); }
+
+  .cat-chart{
+    background:var(--card); border:1px solid var(--line); border-radius:6px;
+    padding:14px 16px; box-shadow:var(--shadow); margin-bottom:22px;
+  }
+  .cat-chart .chart-title{ font-family:'Courier New', monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--ink-faint); margin-bottom:12px; }
+  .cat-row{ display:grid; grid-template-columns:110px 1fr 34px; align-items:center; gap:10px;
+    padding:4px 0; cursor:pointer; border-radius:3px; }
+  .cat-row:hover{ background:var(--line-soft); }
+  .cat-row .cat-name{ font-size:13px; color:var(--ink-soft); text-transform:capitalize; }
+  .cat-row .bar-track{ height:10px; border-radius:4px; background:var(--line-soft); overflow:hidden; }
+  .cat-row .bar{ height:100%; background:var(--pen); border-radius:4px; min-width:2px;
+    transition:width .5s ease; }
+  .cat-row .cat-count{ font-family:'Courier New', monospace; font-size:12px; color:var(--ink-soft); text-align:right; }
+  .cat-row.active .cat-name{ color:var(--pen); font-weight:bold; }
+
+  .review-grid{ display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:22px; align-items:start; }
+  @media (max-width: 900px){ .review-grid{ grid-template-columns:1fr; } }
+
+  .doc-card{
+    background:var(--card); border:1px solid var(--line); border-radius:6px; box-shadow:var(--shadow);
+  }
+  .doc-toolbar{
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:12px 16px; border-bottom:1px solid var(--line-soft);
+  }
+  .view-toggle{ display:flex; border:1px solid var(--line); border-radius:3px; overflow:hidden; }
+  .view-toggle button{ border:none; border-radius:0; padding:7px 14px; font-size:12px; }
+  .view-toggle button.on{ background:var(--pen); color:#fff; }
+  .doc-toolbar .spacer{ flex:1; }
+  .doc{
+    padding:26px 30px 34px; font-size:16.5px; line-height:1.85; white-space:pre-wrap;
+    word-wrap:break-word; min-height:200px;
+  }
+
+  .mark{ cursor:pointer; border-radius:2px; }
+  .mark del{ text-decoration:line-through; text-decoration-color:var(--pen);
+    text-decoration-thickness:1.5px; color:var(--ink-faint); }
+  .mark ins{ text-decoration:none; color:var(--pen); font-weight:bold;
+    border-bottom:1.5px solid var(--pen); margin-left:3px; }
+  .mark.on{ background:color-mix(in srgb, var(--pen-soft) 55%, transparent); }
+  .mark.off del{ text-decoration:none; color:var(--ink);
+    border-bottom:1.5px dotted var(--ink-faint); }
+  .mark.off ins{ display:none; }
+  .mark:hover{ outline:1.5px solid var(--pen); outline-offset:1px; }
+  .mark.dimmed{ opacity:.35; }
+  .mark.flash{ animation:flash 1.2s ease; }
+  @keyframes flash{ 0%,60%{ box-shadow:0 0 0 3px var(--pen-soft); } 100%{ box-shadow:none; } }
+
+  #tooltip{
+    position:fixed; z-index:100; display:none; max-width:300px;
+    background:var(--ink); color:var(--paper); border-radius:4px;
+    padding:10px 12px; font-size:13px; line-height:1.5; box-shadow:var(--shadow);
+    pointer-events:none;
+  }
+  #tooltip .t-head{ font-family:'Courier New', monospace; font-size:10px; letter-spacing:.1em;
+    text-transform:uppercase; opacity:.7; margin-bottom:4px; }
+  #tooltip .t-hint{ font-family:'Courier New', monospace; font-size:10px; letter-spacing:.06em;
+    text-transform:uppercase; opacity:.55; margin-top:6px; }
+
+  /* ---------- changes sidebar ---------- */
+  .side{ position:sticky; top:86px; display:flex; flex-direction:column; gap:12px;
+    max-height:calc(100vh - 110px); }
+  @media (max-width: 900px){ .side{ position:static; max-height:none; } }
+  .side-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  .side-head h3{ font-family:'Courier New', monospace; font-size:12px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--ink-soft); margin:0; font-weight:normal; }
+  .bulk{ display:flex; gap:8px; }
+  .bulk button{ padding:6px 10px; font-size:11px; }
+  .filter-chips{ display:flex; gap:6px; flex-wrap:wrap; }
+  .chip{
+    font-family:'Courier New', monospace; font-size:11px; letter-spacing:.04em;
+    text-transform:capitalize; padding:4px 10px; border-radius:20px;
+    border:1px solid var(--line); background:var(--card); color:var(--ink-soft); cursor:pointer;
+    transition:all .15s;
+  }
+  .chip:hover{ border-color:var(--ink-soft); }
+  .chip.on{ background:var(--pen); border-color:var(--pen); color:#fff; }
+  .changes-list{ overflow-y:auto; display:flex; flex-direction:column; gap:10px; padding-right:2px; }
+  .change-card{
+    background:var(--card); border:1px solid var(--line); border-left:3px solid var(--pen);
+    border-radius:4px; padding:12px 14px; font-size:14px; cursor:pointer;
+    transition:border-color .15s, opacity .2s;
+  }
+  .change-card:hover{ border-color:var(--ink-soft); border-left-color:var(--pen); }
+  .change-card.rejected{ opacity:.55; border-left-color:var(--ink-faint); }
+  .change-card .diff{ line-height:1.6; margin-bottom:6px; word-break:break-word; }
+  .change-card .from{ color:var(--ink-faint); text-decoration:line-through; }
+  .change-card .to{ color:var(--pen); font-weight:bold; }
+  .change-card .meta{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+  .cat-chip{ font-family:'Courier New', monospace; font-size:10px; letter-spacing:.06em;
+    text-transform:uppercase; padding:2px 8px; border-radius:20px;
+    border:1px solid var(--line); color:var(--ink-soft); }
+  .sev-major{ width:7px; height:7px; border-radius:50%; background:var(--pen); display:inline-block; }
+  .change-card .reason{ color:var(--ink-soft); font-size:13px; line-height:1.5; margin-bottom:10px; }
+  .change-card .actions{ display:flex; gap:8px; align-items:center; }
+  .change-card .actions button{ padding:5px 12px; font-size:11px; }
+  .accepted-tag{ font-family:'Courier New', monospace; font-size:10px; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--ok); }
+  .rejected-tag{ font-family:'Courier New', monospace; font-size:10px; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--ink-faint); }
+  .unanchored-note{ font-size:12px; color:var(--ink-faint); font-style:italic; margin-top:4px; }
+  .no-issues{
+    background:var(--ok-soft); border:1px solid var(--ok); border-radius:4px;
+    color:var(--ok); padding:14px 16px; font-size:14px; text-align:center;
+  }
+
+  /* ---------- history drawer ---------- */
+  .drawer-backdrop{
+    position:fixed; inset:0; background:rgba(28,26,23,.35); z-index:80; display:none;
+  }
+  .drawer{
+    position:fixed; top:0; right:-420px; width:min(400px, 92vw); height:100vh; z-index:90;
+    background:var(--card); border-left:1px solid var(--line); box-shadow:var(--shadow);
+    display:flex; flex-direction:column; transition:right .28s ease;
+  }
+  .drawer.open{ right:0; }
+  .drawer-head{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:16px 18px; border-bottom:1px solid var(--line-soft);
+  }
+  .drawer-head h3{ font-size:17px; font-weight:400; margin:0; }
+  .drawer-search{ position:relative; padding:12px 18px; border-bottom:1px solid var(--line-soft); }
+  .drawer-search input{
+    width:100%; padding:9px 34px 9px 12px; font-size:14px; font-family:Georgia, serif;
+    background:var(--paper); color:var(--ink); border:1px solid var(--line); border-radius:3px;
+  }
+  .drawer-search input:focus{ outline:2px solid var(--pen); outline-offset:1px; }
+  .drawer-search .clear-x{
+    position:absolute; right:26px; top:50%; transform:translateY(-50%);
+    border:none; background:none; padding:4px 6px; font-size:13px; color:var(--ink-faint);
+    display:none;
+  }
+  .drawer-search .clear-x:hover{ color:var(--pen); background:none; }
+  .drawer-body{ flex:1; overflow-y:auto; padding:10px 12px 20px; }
+  .job-row{
+    padding:12px 12px; border-bottom:1px solid var(--line-soft); cursor:pointer; border-radius:4px;
+  }
+  .job-row:hover{ background:var(--line-soft); }
+  .job-row .job-date{ font-family:'Courier New', monospace; font-size:11px; color:var(--ink-faint);
+    letter-spacing:.04em; margin-bottom:4px; display:flex; justify-content:space-between; gap:8px; }
+  .job-row .job-issues{ color:var(--pen); }
+  .job-row .job-snippet{ font-size:14px; line-height:1.5; color:var(--ink);
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .empty-msg{ text-align:center; color:var(--ink-faint); font-style:italic; padding:36px 16px; }
+
+  /* ---------- toast ---------- */
+  #toasts{ position:fixed; bottom:22px; left:50%; transform:translateX(-50%); z-index:120;
+    display:flex; flex-direction:column; gap:8px; align-items:center; }
+  .toast{
+    background:var(--ink); color:var(--paper); padding:11px 20px; border-radius:4px;
+    font-size:14px; box-shadow:var(--shadow); animation:toast-in .25s ease;
+    max-width:90vw;
+  }
+  .toast.err{ background:var(--pen); color:#fff; }
+  @keyframes toast-in{ from{ opacity:0; transform:translateY(8px);} to{ opacity:1; transform:none;} }
+
+  footer{
+    border-top:1px solid var(--line); padding:18px 24px; text-align:center;
+    font-family:'Courier New', monospace; font-size:11px; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--ink-faint);
+  }
+  input[type="file"]{ display:none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand" id="brandHome" title="Start a new document" role="button" tabindex="0">
+    <span class="pilcrow">&para;</span>
+    <h1>Proofreader</h1>
+    <span class="tag">end-to-end proofreading agent</span>
+  </div>
+  <div class="header-actions">
+    <button id="historyBtn" title="View recent documents">History</button>
+    <button id="themeBtn" class="icon-btn" title="Toggle dark mode" aria-label="Toggle dark mode">&#9790;</button>
+  </div>
+</header>
+
+<main>
+  <!-- ============ EDITOR ============ -->
+  <section id="editor">
+    <div class="hero">
+      <div class="eyebrow">Grammar &middot; Spelling &middot; Punctuation &middot; Clarity &middot; Consistency</div>
+      <h2>Mark it up.</h2>
+      <p>Paste text or drop a file. The agent reads the whole document, marks every issue inline,
+      and lets you accept or reject each correction before you export.</p>
+    </div>
+
+    <div class="editor-card" id="editorCard">
+      <div class="drop-overlay">Drop file to load &mdash; .txt / .md / .docx</div>
+      <div class="editor-toolbar">
+        <button id="uploadBtn" title="Upload a .txt, .md, or .docx file">&#8613; Upload file</button>
+        <input type="file" id="fileInput" accept=".txt,.md,.docx">
+        <button id="sampleBtn" title="Load a sample paragraph with deliberate errors">Try a sample</button>
+        <span class="spacer"></span>
+        <button id="clearBtn" class="danger" title="Clear the text" style="display:none;">&#10005; Clear</button>
+      </div>
+      <textarea id="input" placeholder="Paste your text here, or drop a file anywhere on this card&hellip;" maxlength="100000"></textarea>
+      <div class="editor-footer" id="editorFooter">
+        <span class="counts" id="counts">0 words &middot; 0 / 100,000 characters</span>
+        <button id="submitBtn" class="primary" title="Proofread the text (Ctrl+Enter)">Proofread &rarr;</button>
+      </div>
+      <div class="progress-wrap" id="progressWrap">
+        <div class="progress-status" id="progressStatus">Reading closely&hellip;</div>
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      </div>
+    </div>
+    <div class="field-error" id="inputError" style="max-width:760px; margin:10px auto 0;"></div>
+  </section>
+
+  <!-- ============ REVIEW ============ -->
+  <section id="review">
+    <div class="review-top">
+      <button id="backBtn" title="Start a new document">&larr; New document</button>
+      <h2 id="docTitle">Pasted text</h2>
+    </div>
+    <p class="review-summary" id="reviewSummary"></p>
+
+    <div class="stats-row" id="statsRow"></div>
+    <div class="cat-chart" id="catChart"></div>
+
+    <div class="review-grid">
+      <div class="doc-card">
+        <div class="doc-toolbar">
+          <div class="view-toggle" role="tablist">
+            <button id="viewMarkup" class="on" title="Show the original text with corrections marked inline">Markup</button>
+            <button id="viewClean" title="Show the final text with accepted corrections applied">Clean</button>
+          </div>
+          <span class="spacer"></span>
+          <button id="copyBtn" title="Copy the corrected text to the clipboard">Copy</button>
+          <button id="downloadBtn" title="Download the corrected text as a .txt file">Download .txt</button>
+        </div>
+        <div class="doc" id="doc"></div>
+      </div>
+
+      <aside class="side">
+        <div class="side-head">
+          <h3 id="changesHead">Corrections</h3>
+          <div class="bulk">
+            <button id="acceptAllBtn" title="Accept every correction">Accept all</button>
+            <button id="rejectAllBtn" class="danger" title="Reject every correction">Reject all</button>
+          </div>
+        </div>
+        <div class="filter-chips" id="filterChips"></div>
+        <div class="changes-list" id="changesList"></div>
+      </aside>
+    </div>
+  </section>
+</main>
+
+<footer>&copy; 2026 Proofreader Agent. All rights reserved.</footer>
+
+<div id="tooltip"></div>
+<div id="toasts"></div>
+
+<div class="drawer-backdrop" id="drawerBackdrop"></div>
+<aside class="drawer" id="drawer" aria-label="Recent documents">
+  <div class="drawer-head">
+    <h3>Recent documents</h3>
+    <button id="drawerClose" class="icon-btn" title="Close history">&#10005;</button>
+  </div>
+  <div class="drawer-search">
+    <input id="historySearch" type="text" placeholder="Search recent documents&hellip;" maxlength="200">
+    <button class="clear-x" id="historyClear" title="Clear search">&#10005;</button>
+  </div>
+  <div class="drawer-body" id="drawerBody"><div class="empty-msg">No records found.</div></div>
+</aside>
+
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+
+/* ---------------- theme ---------------- */
+const themeBtn = $('themeBtn');
+function applyTheme(t){
+  document.documentElement.dataset.theme = t;
+  themeBtn.innerHTML = t === 'dark' ? '&#9788;' : '&#9790;';
+  localStorage.setItem('pr-theme', t);
+}
+applyTheme(localStorage.getItem('pr-theme') ||
+  (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+themeBtn.addEventListener('click', () =>
+  applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+
+/* ---------------- helpers ---------------- */
+function escapeHtml(s){
+  return (s||'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+function toast(msg, isErr){
+  const el = document.createElement('div');
+  el.className = 'toast' + (isErr ? ' err' : '');
+  el.textContent = msg;
+  $('toasts').appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; }, 2600);
+  setTimeout(() => el.remove(), 3000);
+}
+function fmtDate(iso){
+  if(!iso) return '';
+  const d = new Date(iso);
+  if(isNaN(d)) return '';
+  const p = n => String(n).padStart(2,'0');
+  return `${p(d.getDate())}/${p(d.getMonth()+1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+const wordCount = s => (s.match(/[\w'’-]+/g) || []).length;
+
+/* ---------------- state ---------------- */
+const CATEGORIES = ['grammar','spelling','punctuation','clarity','consistency'];
+let state = null;        // { original, title, changes[], stats, summary, id }
+let view = 'markup';
+let filterCat = 'all';
+
+/* ---------------- editor ---------------- */
+const input = $('input'), counts = $('counts'), inputError = $('inputError');
+const submitBtn = $('submitBtn'), clearBtn = $('clearBtn');
+const MAX_CHARS = 100000;
+let loadedFilename = null;
+
+function refreshCounts(){
+  const t = input.value;
+  const over = t.length >= MAX_CHARS;
+  counts.innerHTML = `${wordCount(t).toLocaleString('en-GB')} words &middot; ` +
+    `<span class="${over?'over':''}">${t.length.toLocaleString('en-GB')} / ${MAX_CHARS.toLocaleString('en-GB')} characters</span>`;
+  clearBtn.style.display = t ? '' : 'none';
+}
+input.addEventListener('input', () => { loadedFilename = null; refreshCounts(); hideError(); });
+refreshCounts();
+
+function showError(msg){ inputError.textContent = msg; inputError.style.display = 'block'; }
+function hideError(){ inputError.style.display = 'none'; }
+
+clearBtn.addEventListener('click', () => {
+  input.value = ''; loadedFilename = null; refreshCounts(); hideError(); input.focus();
+});
+
+const SAMPLE = `Their going to love the new proposal, wich we have wrote over the last too weeks. Each of the team members have reviewed it seperately, and no one have raised any concern's.
+
+The proposal recieve alot of positive feedback allready. Its main strenght is it's simplicity: we dont try to boil the ocean, we focuses on three deliverable that matters most to the client.
+
+Between you and I, the biggest risk are the timeline. If the client want changes, we will loose atleast two weeks, an the launch date will effected.`;
+$('sampleBtn').addEventListener('click', () => {
+  input.value = SAMPLE; loadedFilename = null; refreshCounts(); hideError(); input.focus();
+});
+
+/* -------- file upload + drag & drop -------- */
+$('uploadBtn').addEventListener('click', () => $('fileInput').click());
+$('fileInput').addEventListener('change', e => {
+  if(e.target.files[0]) loadFile(e.target.files[0]);
+  e.target.value = '';
+});
+const card = $('editorCard');
+['dragenter','dragover'].forEach(ev => card.addEventListener(ev, e => {
+  e.preventDefault(); card.classList.add('dragging');
+}));
+['dragleave','drop'].forEach(ev => card.addEventListener(ev, e => {
+  e.preventDefault(); if(ev==='dragleave' && e.relatedTarget && card.contains(e.relatedTarget)) return;
+  card.classList.remove('dragging');
+}));
+card.addEventListener('drop', e => {
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if(f) loadFile(f);
+});
+
+async function loadFile(file){
+  hideError();
+  const name = file.name.toLowerCase();
+  if(!/\.(txt|md|docx)$/.test(name)){
+    showError('Unsupported file type. Upload a .txt, .md, or .docx file.'); return;
+  }
+  try{
+    const fd = new FormData(); fd.append('file', file);
+    const res = await fetch('/extract', { method:'POST', body: fd });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.detail || 'Could not read the file.');
+    input.value = data.text.slice(0, MAX_CHARS);
+    loadedFilename = data.filename;
+    refreshCounts();
+    toast(`Loaded ${data.filename}.`);
+  }catch(err){ showError(err.message); }
+}
+
+/* ---------------- proofread (streaming) ---------------- */
+const progressWrap = $('progressWrap'), progressFill = $('progressFill'),
+      progressStatus = $('progressStatus'), editorFooter = $('editorFooter');
+const SPIN = ['Reading closely…','Checking the grammar…','Minding the commas…',
+  'Weighing every word…','Sharpening the red pen…'];
+let spinTimer = null;
+
+function setBusy(b){
+  submitBtn.disabled = b;
+  editorFooter.style.display = b ? 'none' : 'flex';
+  progressWrap.style.display = b ? 'block' : 'none';
+  if(b){
+    let i = 0;
+    progressFill.classList.add('indeterminate');
+    progressStatus.textContent = SPIN[0];
+    spinTimer = setInterval(() => { progressStatus.textContent = SPIN[++i % SPIN.length]; }, 2200);
+  }else{
+    clearInterval(spinTimer);
+    progressFill.classList.remove('indeterminate');
+    progressFill.style.width = '4%';
+  }
+}
+
+async function proofread(){
+  const text = input.value;
+  hideError();
+  if(!text.trim()){ showError('Text must not be empty.'); return; }
+  if(text.length > MAX_CHARS){ showError(`Text exceeds the ${MAX_CHARS.toLocaleString('en-GB')} character limit.`); return; }
+  setBusy(true);
+  try{
+    const payload = await streamProofread(text) || await plainProofread(text);
+    enterReview(text, payload);
+  }catch(err){
+    showError(err.message || 'Something went wrong. Please try again.');
+  }finally{
+    setBusy(false);
+  }
+}
+
+async function streamProofread(text){
+  let res;
+  try{
+    res = await fetch('/proofread/stream', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})
+    });
+  }catch{ return null; }
+  if(!res.ok){
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || 'Request failed.');
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', payload = null;
+  while(true){
+    const {done, value} = await reader.read();
+    if(done) break;
+    buf += dec.decode(value, {stream:true});
+    let idx;
+    while((idx = buf.indexOf('\n\n')) >= 0){
+      const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 2);
+      if(!line.startsWith('data:')) continue;
+      const ev = JSON.parse(line.slice(5));
+      if(ev.type === 'progress'){
+        progressFill.classList.remove('indeterminate');
+        const pct = ev.total ? Math.max(4, Math.round(ev.done / ev.total * 100)) : 4;
+        progressFill.style.width = pct + '%';
+        if(ev.total > 1){
+          clearInterval(spinTimer);
+          progressStatus.textContent = `Analysing section ${Math.min(ev.done + 1, ev.total)} of ${ev.total}…`;
+        }
+      }else if(ev.type === 'result'){
+        payload = ev.payload;
+      }else if(ev.type === 'error'){
+        throw new Error(ev.detail || 'Proofreading failed.');
+      }
+    }
+  }
+  return payload;
+}
+
+async function plainProofread(text){
+  const res = await fetch('/proofread', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})
+  });
+  const data = await res.json().catch(() => ({}));
+  if(!res.ok) throw new Error(data.detail || 'Request failed.');
+  return data;
+}
+
+submitBtn.addEventListener('click', proofread);
+input.addEventListener('keydown', e => {
+  if((e.metaKey || e.ctrlKey) && e.key === 'Enter') proofread();
+});
+
+/* ---------------- review ---------------- */
+function enterReview(original, payload, title){
+  const changes = (payload.changes || []).map((c, i) => ({...c, i, accepted: true}));
+  state = {
+    original,
+    title: title || loadedFilename || 'Pasted text',
+    changes,
+    stats: payload.stats || {},
+    summary: payload.summary || '',
+    id: payload.id || null,
+  };
+  view = 'markup'; filterCat = 'all';
+  $('viewMarkup').classList.add('on'); $('viewClean').classList.remove('on');
+  $('editor').style.display = 'none';
+  $('review').style.display = 'block';
+  $('docTitle').textContent = state.title;
+  $('reviewSummary').textContent = state.summary;
+  renderAll();
+  window.scrollTo({top: 0});
+}
+
+function exitReview(){
+  state = null;
+  $('review').style.display = 'none';
+  $('editor').style.display = 'block';
+  input.focus();
+}
+$('backBtn').addEventListener('click', exitReview);
+$('brandHome').addEventListener('click', exitReview);
+$('brandHome').addEventListener('keydown', e => { if(e.key==='Enter') exitReview(); });
+
+const anchored = () => state.changes.filter(c => c.start !== null && c.start !== undefined);
+const acceptedCount = () => state.changes.filter(c => c.accepted).length;
+
+function cleanText(){
+  let out = '', pos = 0;
+  const list = anchored().slice().sort((a,b) => a.start - b.start);
+  for(const c of list){
+    out += state.original.slice(pos, c.start);
+    out += c.accepted ? c.corrected : state.original.slice(c.start, c.end);
+    pos = c.end;
+  }
+  return out + state.original.slice(pos);
+}
+
+function renderAll(){ renderStats(); renderChart(); renderDoc(); renderChanges(); }
+
+function renderStats(){
+  const s = state.stats, n = state.changes.length;
+  $('statsRow').innerHTML = `
+    <div class="stat-tile"><div class="label">Words</div>
+      <div class="value">${(s.words||0).toLocaleString('en-GB')}</div></div>
+    <div class="stat-tile"><div class="label">Issues found</div>
+      <div class="value">${n.toLocaleString('en-GB')}</div></div>
+    <div class="stat-tile"><div class="label">Accepted</div>
+      <div class="value">${acceptedCount().toLocaleString('en-GB')} <small>/ ${n.toLocaleString('en-GB')}</small></div></div>
+    <div class="stat-tile"><div class="label">Issues per 100 words</div>
+      <div class="value">${s.issues_per_100_words ?? 0}</div></div>`;
+}
+
+function renderChart(){
+  const by = (state.stats.by_category) || {};
+  const max = Math.max(1, ...CATEGORIES.map(c => by[c] || 0));
+  $('catChart').innerHTML = `<div class="chart-title">Issues by category &mdash; click to filter</div>` +
+    CATEGORIES.map(c => {
+      const v = by[c] || 0;
+      return `<div class="cat-row ${filterCat===c?'active':''}" data-cat="${c}" title="${v} ${c} issue${v===1?'':'s'}">
+        <span class="cat-name">${c}</span>
+        <span class="bar-track"><span class="bar" style="width:${Math.round(v/max*100)}%; opacity:${v?1:0}"></span></span>
+        <span class="cat-count">${v}</span></div>`;
+    }).join('');
+  $('catChart').querySelectorAll('.cat-row').forEach(row => {
+    row.addEventListener('click', () => setFilter(row.dataset.cat === filterCat ? 'all' : row.dataset.cat));
+  });
+}
+
+function setFilter(cat){
+  filterCat = cat;
+  renderChart(); renderChanges(); applyDimming();
+}
+
+function applyDimming(){
+  document.querySelectorAll('#doc .mark').forEach(el => {
+    const c = state.changes[+el.dataset.i];
+    el.classList.toggle('dimmed', filterCat !== 'all' && c.category !== filterCat);
+  });
+}
+
+function renderDoc(){
+  const doc = $('doc');
+  if(view === 'clean'){
+    doc.textContent = cleanText();
+    return;
+  }
+  const list = anchored().slice().sort((a,b) => a.start - b.start);
+  let html = '', pos = 0;
+  for(const c of list){
+    html += escapeHtml(state.original.slice(pos, c.start));
+    html += `<span class="mark ${c.accepted?'on':'off'}" data-i="${c.i}" tabindex="0" role="button"` +
+      ` aria-label="${escapeHtml(c.category)} correction">` +
+      `<del>${escapeHtml(c.original)}</del><ins>${escapeHtml(c.corrected)}</ins></span>`;
+    pos = c.end;
+  }
+  html += escapeHtml(state.original.slice(pos));
+  doc.innerHTML = html;
+  doc.querySelectorAll('.mark').forEach(el => {
+    el.addEventListener('click', () => toggleChange(+el.dataset.i));
+    el.addEventListener('keydown', e => { if(e.key==='Enter'||e.key===' '){ e.preventDefault(); toggleChange(+el.dataset.i); } });
+    el.addEventListener('mouseenter', e => showTooltip(el, +el.dataset.i));
+    el.addEventListener('mouseleave', hideTooltip);
+  });
+  applyDimming();
+}
+
+function renderChanges(){
+  const listEl = $('changesList');
+  const visible = state.changes.filter(c => filterCat === 'all' || c.category === filterCat);
+  $('changesHead').textContent = `Corrections (${visible.length})`;
+
+  const counts = {all: state.changes.length};
+  CATEGORIES.forEach(c => counts[c] = state.changes.filter(x => x.category === c).length);
+  $('filterChips').innerHTML = ['all', ...CATEGORIES.filter(c => counts[c])].map(c =>
+    `<button class="chip ${filterCat===c?'on':''}" data-cat="${c}">${c} ${c==='all'?counts.all:counts[c]}</button>`
+  ).join('');
+  $('filterChips').querySelectorAll('.chip').forEach(ch =>
+    ch.addEventListener('click', () => setFilter(ch.dataset.cat)));
+
+  if(!state.changes.length){
+    listEl.innerHTML = `<div class="no-issues">No issues found. This text is clean.</div>`;
+    return;
+  }
+  if(!visible.length){
+    listEl.innerHTML = `<div class="empty-msg">No records found.</div>`;
+    return;
+  }
+  listEl.innerHTML = visible.map(c => {
+    const un = c.start === null || c.start === undefined;
+    return `<div class="change-card ${c.accepted?'':'rejected'}" data-i="${c.i}">
+      <div class="meta">
+        <span class="cat-chip">${escapeHtml(c.category)}</span>
+        ${c.severity==='major' ? '<span class="sev-major" title="Major issue"></span>' : ''}
+        <span class="spacer" style="flex:1"></span>
+        ${c.accepted ? '<span class="accepted-tag">Accepted</span>' : '<span class="rejected-tag">Rejected</span>'}
+      </div>
+      <div class="diff"><span class="from">${escapeHtml(c.original)}</span> &rarr; <span class="to">${escapeHtml(c.corrected)}</span></div>
+      ${c.reason ? `<div class="reason">${escapeHtml(c.reason)}</div>` : ''}
+      <div class="actions">
+        ${c.accepted
+          ? `<button class="danger toggle-btn" title="Reject this correction">Reject</button>`
+          : `<button class="toggle-btn" title="Accept this correction">Accept</button>`}
+      </div>
+      ${un ? '<div class="unanchored-note">Could not be located exactly in the text, so it is not applied automatically.</div>' : ''}
+    </div>`;
+  }).join('');
+
+  listEl.querySelectorAll('.change-card').forEach(cardEl => {
+    const i = +cardEl.dataset.i;
+    cardEl.querySelector('.toggle-btn').addEventListener('click', e => {
+      e.stopPropagation(); toggleChange(i);
+    });
+    cardEl.addEventListener('click', () => scrollToMark(i));
+  });
+}
+
+function toggleChange(i){
+  const c = state.changes[i];
+  c.accepted = !c.accepted;
+  renderStats();
+  renderChanges();
+  if(view === 'clean'){ renderDoc(); }
+  else{
+    const el = document.querySelector(`#doc .mark[data-i="${i}"]`);
+    if(el){ el.classList.toggle('on', c.accepted); el.classList.toggle('off', !c.accepted); }
+  }
+}
+
+function scrollToMark(i){
+  if(view !== 'markup') return;
+  const el = document.querySelector(`#doc .mark[data-i="${i}"]`);
+  if(!el) return;
+  el.scrollIntoView({behavior:'smooth', block:'center'});
+  el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+}
+
+/* -------- tooltip -------- */
+const tooltip = $('tooltip');
+function showTooltip(el, i){
+  const c = state.changes[i];
+  tooltip.innerHTML = `<div class="t-head">${escapeHtml(c.category)} &middot; ${escapeHtml(c.severity)}</div>` +
+    `${escapeHtml(c.reason || 'Suggested correction.')}` +
+    `<div class="t-hint">Click to ${c.accepted ? 'reject' : 'accept'}</div>`;
+  tooltip.style.display = 'block';
+  const r = el.getBoundingClientRect(), tw = tooltip.offsetWidth;
+  let x = r.left + r.width/2 - tw/2;
+  x = Math.max(8, Math.min(x, innerWidth - tw - 8));
+  let y = r.top - tooltip.offsetHeight - 8;
+  if(y < 8) y = r.bottom + 8;
+  tooltip.style.left = x + 'px'; tooltip.style.top = y + 'px';
+}
+function hideTooltip(){ tooltip.style.display = 'none'; }
+
+/* -------- view toggle, bulk, export -------- */
+$('viewMarkup').addEventListener('click', () => {
+  view = 'markup';
+  $('viewMarkup').classList.add('on'); $('viewClean').classList.remove('on');
+  renderDoc();
+});
+$('viewClean').addEventListener('click', () => {
+  view = 'clean';
+  $('viewClean').classList.add('on'); $('viewMarkup').classList.remove('on');
+  renderDoc();
+});
+$('acceptAllBtn').addEventListener('click', () => {
+  state.changes.forEach(c => c.accepted = true);
+  renderAll(); toast('All corrections accepted.');
+});
+$('rejectAllBtn').addEventListener('click', () => {
+  state.changes.forEach(c => c.accepted = false);
+  renderAll(); toast('All corrections rejected.');
+});
+$('copyBtn').addEventListener('click', async () => {
+  try{
+    await navigator.clipboard.writeText(cleanText());
+    toast('Copied to clipboard.');
+  }catch{ toast('Could not copy to clipboard.', true); }
+});
+$('downloadBtn').addEventListener('click', () => {
+  const base = (state.title || 'document').replace(/\.(txt|md|docx)$/i, '');
+  const blob = new Blob([cleanText()], {type:'text/plain;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${base} (proofread).txt`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('Downloaded corrected text.');
+});
+
+/* ---------------- history drawer ---------------- */
+const drawer = $('drawer'), backdrop = $('drawerBackdrop');
+let jobsCache = [];
+
+function openDrawer(){
+  drawer.classList.add('open'); backdrop.style.display = 'block';
+  loadJobs();
+}
+function closeDrawer(){ drawer.classList.remove('open'); backdrop.style.display = 'none'; }
+$('historyBtn').addEventListener('click', openDrawer);
+$('drawerClose').addEventListener('click', closeDrawer);
+backdrop.addEventListener('click', closeDrawer);
+document.addEventListener('keydown', e => { if(e.key === 'Escape'){ closeDrawer(); hideTooltip(); } });
+
+async function loadJobs(){
+  const body = $('drawerBody');
+  body.innerHTML = '<div class="empty-msg">Loading…</div>';
+  try{
+    const res = await fetch('/jobs?limit=50');
+    jobsCache = res.ok ? await res.json() : [];
+  }catch{ jobsCache = []; }
+  renderJobs();
+}
+
+function renderJobs(){
+  const q = $('historySearch').value.trim().toLowerCase();
+  $('historyClear').style.display = q ? 'block' : 'none';
+  const rows = jobsCache.filter(j =>
+    !q || (j.original_text||'').toLowerCase().includes(q) || (j.summary||'').toLowerCase().includes(q));
+  const body = $('drawerBody');
+  if(!rows.length){
+    body.innerHTML = '<div class="empty-msg">No records found.</div>';
+    return;
+  }
+  body.innerHTML = rows.map(j => {
+    const issues = (j.stats && j.stats.issues) ?? (Array.isArray(j.changes) ? j.changes.length : '');
+    return `<div class="job-row" data-id="${j.id}" title="Open this document">
+      <div class="job-date"><span>${fmtDate(j.created_at)}</span>
+        <span class="job-issues">${issues !== '' ? issues + ' issue' + (issues===1?'':'s') : ''}</span></div>
+      <div class="job-snippet">${escapeHtml((j.original_text||'').slice(0, 160))}</div>
+    </div>`;
+  }).join('');
+  body.querySelectorAll('.job-row').forEach(row =>
+    row.addEventListener('click', () => openJob(row.dataset.id)));
+}
+$('historySearch').addEventListener('input', renderJobs);
+$('historyClear').addEventListener('click', () => { $('historySearch').value=''; renderJobs(); });
+
+async function openJob(id){
+  try{
+    const res = await fetch(`/jobs/${id}`);
+    if(!res.ok) throw new Error('Job not found.');
+    const job = await res.json();
+    closeDrawer();
+    enterReview(job.original_text, {
+      changes: job.changes || [], stats: job.stats || {},
+      summary: job.summary || '', id: job.id,
+    }, `Document from ${fmtDate(job.created_at)}`);
+  }catch(err){ toast(err.message, true); }
+}
+</script>
+</body>
+</html>
