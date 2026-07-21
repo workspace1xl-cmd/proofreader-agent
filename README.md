@@ -26,7 +26,7 @@ note) rather than failing the whole document.
 1. cloud.cerebras.ai → sign up → API Keys → create key.
 2. Free tier gives generous daily token limits, no card needed.
 3. Copy key → `CEREBRAS_API_KEY`.
-4. Default model: `llama-3.3-70b`. Change via `CEREBRAS_MODEL` env var if needed
+4. Default model: `gpt-oss-120b`. Change via `CEREBRAS_MODEL` env var if needed
    (check cloud.cerebras.ai/models for the current list — availability changes).
 
 ## 2. Supabase (optional)

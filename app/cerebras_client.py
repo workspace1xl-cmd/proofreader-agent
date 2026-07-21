@@ -9,7 +9,7 @@ import httpx
 
 CEREBRAS_API_KEY = os.environ.get("CEREBRAS_API_KEY", "")
 CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
-MODEL = os.environ.get("CEREBRAS_MODEL", "llama-3.3-70b")
+MODEL = os.environ.get("CEREBRAS_MODEL", "gpt-oss-120b")
 
 SYSTEM_PROMPT = """You are a precision proofreading engine. You correct grammar, spelling, \
 punctuation, clarity, and consistency issues WITHOUT changing the author's meaning, tone, or voice. \

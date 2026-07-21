@@ -9,7 +9,7 @@ services:
       - key: CEREBRAS_API_KEY
         sync: false
       - key: CEREBRAS_MODEL
-        value: llama-3.3-70b
+        value: gpt-oss-120b
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_KEY
