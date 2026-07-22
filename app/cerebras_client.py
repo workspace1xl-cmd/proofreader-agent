@@ -95,6 +95,48 @@ def _parse_response(raw: str) -> dict | None:
     return None
 
 
+async def call_json(
+    client: httpx.AsyncClient,
+    system: str,
+    user: str,
+    max_tokens: int = 4096,
+    temperature: float = 0.1,
+    attempts: int = 2,
+) -> dict | None:
+    """One structured-JSON model call with retries. Returns None if every
+    attempt fails to produce parseable JSON — callers degrade gracefully."""
+    if not CEREBRAS_API_KEY:
+        raise RuntimeError(
+            "CEREBRAS_API_KEY is not set. Create a key at cloud.cerebras.ai and export it."
+        )
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    headers = {
+        "Authorization": f"Bearer {CEREBRAS_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    for attempt in range(attempts):
+        try:
+            resp = await client.post(CEREBRAS_URL, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            parsed = _parse_response(data["choices"][0]["message"]["content"])
+            if parsed is not None:
+                return parsed
+        except (httpx.HTTPError, KeyError, IndexError):
+            pass
+        if attempt < attempts - 1:
+            await asyncio.sleep(1.5)
+    return None
+
+
 async def proofread_chunk(client: httpx.AsyncClient, text: str, attempts: int = 3) -> dict:
     """Proofread one chunk of text. Returns the parsed model response.
 

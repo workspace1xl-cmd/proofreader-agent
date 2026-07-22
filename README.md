@@ -1,8 +1,45 @@
-# Proofreader Agent — End to End
+# Proofreader Agent — Agentic Document Review Platform
 
-An end-to-end proofreading agent: paste text or drop a file, and it reads the whole
-document, marks every issue inline (grammar, spelling, punctuation, clarity,
-consistency), lets you accept or reject each correction, then export the result.
+An end-to-end document review system: paste text or drop a file, and a team of
+specialist AI agents reviews it from independent perspectives — mechanical
+corrections marked inline plus document-level findings on terminology,
+structure, procedures, workflow logic, and ISO/QMS compliance — verified by a
+false-positive filter, scored, and summarised. You accept or reject every
+suggestion, then export in six formats.
+
+## Architecture
+
+```
+                          Input (paste / .txt / .md / .docx incl. tables)
+                                            │
+                                       Parser + chunker
+                                            │
+        ┌───────────┬───────────┬───────────┼───────────┬───────────┬──────────┐
+        ▼           ▼           ▼           ▼           ▼           ▼          ▼
+   Corrections  Terminology  Structure  Procedure   Flowchart/   ISO/QMS   (chunks
+   (grammar,    consistency  & format   validation  decision     compliance  run in
+   spelling,                            (prose vs   logic                  parallel)
+   punctuation,                          tables)
+   clarity — per chunk)
+        └───────────┴───────────┴───────────┼───────────┴───────────┴──────────┘
+                                            ▼
+                              Merge + anchor + dedupe engine
+                                            │
+                              False-positive verification agent
+                              (keep/reject + confidence per item)
+                                            │
+                     Deterministic scoring (8 areas + overall, 0–100)
+                                            │
+                              Executive summary agent (risk, top issues)
+                                            │
+                    Report → UI (accept/reject, filters, search, exports)
+                                            │
+                              Persistence (Supabase / in-memory)
+```
+
+Every agent is an independent LLM call with its own prompt and a structured-JSON
+contract; the orchestrator ([app/pipeline.py](app/pipeline.py)) runs them concurrently
+and streams per-agent status to the browser over SSE.
 
 **Stack:** FastAPI backend · Cerebras API for inference (fast Llama models, free
 tier) · Supabase Postgres for job history (optional — falls back to in-memory) ·
@@ -114,20 +151,37 @@ Each entry in `changes[]`:
 `start`/`end` are character offsets into the original text (`null` if the snippet
 could not be located — such changes are listed but not auto-applied).
 
-`stats.review` holds the document-level structural review:
+`stats.report` holds the full multi-agent review:
 ```json
 {
+  "agents": [{"key": "...", "label": "...", "status": "done", "verdict": "...", "findings": 2}],
   "findings": [
-    {"title": "...", "detail": "...", "category": "terminology|structure|logic|consistency", "severity": "minor|major"}
+    {"agent": "logic", "title": "...", "detail": "...", "location": "...",
+     "severity": "minor|major", "verified": true, "confidence": 0.9}
   ],
-  "verdict": "one-sentence structural assessment",
-  "truncated": false
+  "scores": {"grammar": 96, "spelling": 98, "punctuation": 95, "consistency": 90,
+             "structure": 100, "procedure": 88, "logic": 88, "iso": 94, "overall": 93},
+  "summary": {"summary": "...", "risk_level": "low|medium|high", "top_issues": [], "readability": 80},
+  "iso": {"present_sections": [], "missing_sections": [], "is_sop": true}
 }
 ```
-The correction pass is also tuned against false positives: it will not rename
+Scoring is deterministic (each area starts at 100, verified issues subtract
+minor=2/major=6 with length scaling) — only the findings themselves come from
+the model. Items rejected by the verification agent carry `verified: false`,
+are excluded from scores, default to rejected in the UI, and are listed under
+"Filtered as likely false positives".
+
+The correction pass is tuned against false positives: it will not rename
 roles/titles/defined terms, will not impose optional style (e.g. the Oxford
 comma or colons on headings) unless the document is internally inconsistent,
 and prefers fewer high-confidence corrections over marginal ones.
+
+**Exports:** corrected text as `.txt` / `.docx`, review report as Markdown,
+findings as CSV, full data as JSON, accept/reject audit log as JSON, and
+Print/PDF via the browser.
+
+**Tests:** `python tests/run_tests.py` — unit + integration suite with stubbed
+agents (chunking, anchoring, dedupe, scoring, verification, progress events).
 
 ## What this does NOT do
 

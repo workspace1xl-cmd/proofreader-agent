@@ -60,6 +60,7 @@
   .brand h1{ font-size:19px; font-weight:400; margin:0; letter-spacing:.01em; }
   .brand .tag{ font-family:'Courier New', monospace; font-size:11px; letter-spacing:.12em;
     text-transform:uppercase; color:var(--ink-faint); }
+  @media (max-width:600px){ .brand .tag{ display:none; } }
   .header-actions{ display:flex; gap:10px; }
 
   /* ---------- buttons ---------- */
@@ -135,6 +136,58 @@
   }
   .progress-fill.indeterminate{ animation:sweep 1.4s ease-in-out infinite; width:30%; }
   @keyframes sweep{ 0%{margin-left:-30%;} 100%{margin-left:100%;} }
+  .agent-list{ margin-top:18px; display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
+    gap:4px; text-align:left; }
+  .agent-item{ display:flex; align-items:center; gap:9px; font-family:'Courier New', monospace;
+    font-size:11px; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-soft); padding:4px 6px; }
+  .agent-item .dot{ width:8px; height:8px; border-radius:50%; background:var(--line); flex-shrink:0; }
+  .agent-item.running .dot{ background:var(--pen); animation:pulse 1s infinite; }
+  .agent-item.done .dot{ background:var(--ok); }
+  .agent-item.failed .dot{ background:var(--ink-faint); }
+  @keyframes pulse{ 50%{ opacity:.25; } }
+
+  .scores-row{ display:grid; grid-template-columns:repeat(auto-fit, minmax(94px, 1fr)); gap:8px; margin:4px 0 14px; }
+  .score-tile{ background:var(--paper); border:1px solid var(--line); border-radius:5px; padding:9px 10px; text-align:center; }
+  .score-tile .s-label{ font-family:'Courier New', monospace; font-size:9.5px; letter-spacing:.07em;
+    text-transform:uppercase; color:var(--ink-faint); margin-bottom:3px; }
+  .score-tile .s-val{ font-size:21px; line-height:1.1; }
+  .score-tile.overall{ border-color:var(--pen); background:var(--pen-soft); }
+  .risk-badge{ font-family:'Courier New', monospace; font-size:11px; letter-spacing:.08em;
+    text-transform:uppercase; padding:3px 12px; border-radius:20px; border:1px solid var(--line); }
+  .risk-low{ color:var(--ok); border-color:var(--ok); background:var(--ok-soft); }
+  .risk-medium{ color:#8A6D1A; border-color:#C9A94F; background:rgba(201,169,79,.14); }
+  .risk-high{ color:var(--pen); border-color:var(--pen); background:var(--pen-soft); }
+  .exec-summary{ font-size:14.5px; line-height:1.65; color:var(--ink); margin:8px 0 2px; }
+  .top-issues{ margin:8px 0 0; padding-left:20px; font-size:13.5px; color:var(--ink-soft); line-height:1.7; }
+  .findings-controls{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:14px 0 2px; }
+  .findings-controls input{ flex:1; min-width:170px; padding:7px 11px; font-family:Georgia, serif;
+    font-size:13.5px; background:var(--paper); color:var(--ink); border:1px solid var(--line); border-radius:3px; }
+  .findings-controls input:focus{ outline:2px solid var(--pen); outline-offset:1px; }
+  .agent-group-title{ font-family:'Courier New', monospace; font-size:11px; letter-spacing:.08em;
+    text-transform:uppercase; color:var(--ink-soft); margin:16px 0 0; display:flex;
+    justify-content:space-between; gap:10px; }
+  .agent-group-title .g-verdict{ text-transform:none; letter-spacing:0; font-family:Georgia, serif;
+    font-style:italic; color:var(--ink-faint); font-size:12.5px; text-align:right; }
+  .conf{ font-family:'Courier New', monospace; font-size:10px; color:var(--ink-faint); }
+  .filtered-tag{ font-family:'Courier New', monospace; font-size:10px; letter-spacing:.06em;
+    text-transform:uppercase; color:#8A6D1A; }
+  .fp-group{ margin-top:16px; }
+  .fp-group summary{ cursor:pointer; font-family:'Courier New', monospace; font-size:11px;
+    text-transform:uppercase; letter-spacing:.06em; color:var(--ink-faint); }
+  .export-menu{ position:relative; }
+  .export-menu .menu{ position:absolute; right:0; top:calc(100% + 6px); background:var(--card);
+    border:1px solid var(--line); border-radius:4px; box-shadow:var(--shadow); display:none;
+    flex-direction:column; min-width:200px; z-index:40; }
+  .export-menu .menu.open{ display:flex; }
+  .export-menu .menu button{ border:none; border-radius:0; text-align:left; padding:10px 14px;
+    font-size:11px; background:var(--card); }
+  .export-menu .menu button:hover{ background:var(--line-soft); }
+  @media print{
+    header, footer, #editor, .doc-toolbar, .bulk, .filter-chips, .findings-controls,
+    .change-card .actions, #toasts, .drawer, .drawer-backdrop{ display:none !important; }
+    .review-grid{ grid-template-columns:1fr; }
+    body{ background:#fff; color:#000; }
+  }
 
   /* ---------- review view ---------- */
   #review{ display:none; }
@@ -383,6 +436,7 @@
       <div class="progress-wrap" id="progressWrap">
         <div class="progress-status" id="progressStatus">Reading closely&hellip;</div>
         <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <div class="agent-list" id="agentList"></div>
       </div>
     </div>
     <div class="field-error" id="inputError" style="max-width:760px; margin:10px auto 0;"></div>
@@ -410,6 +464,17 @@
           <span class="spacer"></span>
           <button id="copyBtn" title="Copy the corrected text to the clipboard">Copy</button>
           <button id="downloadBtn" title="Download the corrected text as a .txt file">Download .txt</button>
+          <div class="export-menu" id="exportMenu">
+            <button id="exportBtn" title="More export formats">Export &#9662;</button>
+            <div class="menu" id="exportDropdown">
+              <button id="expDocx" title="Corrected text as a Word document">Word (.docx)</button>
+              <button id="expMd" title="Full review report as Markdown">Report (Markdown)</button>
+              <button id="expCsv" title="All findings and corrections as CSV">Findings (CSV)</button>
+              <button id="expJson" title="Complete structured data as JSON">Full data (JSON)</button>
+              <button id="expAudit" title="Accept/reject decision log as JSON">Audit log (JSON)</button>
+              <button id="expPrint" title="Print the report or save as PDF">Print / PDF</button>
+            </div>
+          </div>
         </div>
         <div class="doc" id="doc"></div>
       </div>
@@ -572,6 +637,7 @@ function setBusy(b){
   progressWrap.style.display = b ? 'block' : 'none';
   if(b){
     let i = 0;
+    $('agentList').innerHTML = '';
     progressFill.classList.add('indeterminate');
     progressStatus.textContent = SPIN[0];
     spinTimer = setInterval(() => { progressStatus.textContent = SPIN[++i % SPIN.length]; }, 2200);
@@ -629,6 +695,8 @@ async function streamProofread(text){
           clearInterval(spinTimer);
           progressStatus.textContent = `Analysing section ${Math.min(ev.done + 1, ev.total)} of ${ev.total}…`;
         }
+      }else if(ev.type === 'agent'){
+        upsertAgent(ev);
       }else if(ev.type === 'result'){
         payload = ev.payload;
       }else if(ev.type === 'error'){
@@ -637,6 +705,21 @@ async function streamProofread(text){
     }
   }
   return payload;
+}
+
+function upsertAgent(ev){
+  const list = $('agentList');
+  let el = list.querySelector(`[data-key="${ev.key}"]`);
+  if(!el){
+    el = document.createElement('div');
+    el.className = 'agent-item';
+    el.dataset.key = ev.key;
+    el.innerHTML = `<span class="dot"></span><span class="a-label"></span>`;
+    list.appendChild(el);
+  }
+  el.querySelector('.a-label').textContent = ev.label;
+  el.classList.remove('running','done','failed');
+  el.classList.add(ev.state);
 }
 
 async function plainProofread(text){
@@ -655,7 +738,8 @@ input.addEventListener('keydown', e => {
 
 /* ---------------- review ---------------- */
 function enterReview(original, payload, title){
-  const changes = (payload.changes || []).map((c, i) => ({...c, i, accepted: true}));
+  // Corrections rejected by the verification agent start unaccepted.
+  const changes = (payload.changes || []).map((c, i) => ({...c, i, accepted: c.verified !== false}));
   state = {
     original,
     title: title || loadedFilename || 'Pasted text',
@@ -663,7 +747,12 @@ function enterReview(original, payload, title){
     stats: payload.stats || {},
     summary: payload.summary || '',
     id: payload.id || null,
+    audit: [],
+    fSev: 'all',
+    fQ: '',
   };
+  audit('review_opened', `${changes.length} corrections, ` +
+    `${((payload.stats||{}).report||{}).findings ? payload.stats.report.findings.length : 0} findings`);
   view = 'markup'; filterCat = 'all';
   $('viewMarkup').classList.add('on'); $('viewClean').classList.remove('on');
   $('editor').style.display = 'none';
@@ -684,6 +773,10 @@ $('backBtn').addEventListener('click', exitReview);
 $('brandHome').addEventListener('click', exitReview);
 $('brandHome').addEventListener('keydown', e => { if(e.key==='Enter') exitReview(); });
 
+function audit(action, detail){
+  if(state) state.audit.push({ts: new Date().toISOString(), action, detail: detail || ''});
+}
+
 const anchored = () => state.changes.filter(c => c.start !== null && c.start !== undefined);
 const acceptedCount = () => state.changes.filter(c => c.accepted).length;
 
@@ -700,32 +793,110 @@ function cleanText(){
 
 function renderAll(){ renderStats(); renderChart(); renderReview(); renderDoc(); renderChanges(); }
 
+const SCORE_ORDER = ['overall','grammar','spelling','punctuation','consistency','structure','procedure','logic','iso'];
+
+function findingRow(f){
+  return `
+    <div class="finding ${f.severity==='major'?'major':''}">
+      <span class="sev-dot" title="${f.severity==='major'?'Major':'Minor'}"></span>
+      <div class="f-body">
+        <span class="f-title">${escapeHtml(f.title)}</span>
+        <span class="cat-chip">${escapeHtml(f.category)}</span>
+        ${f.confidence != null ? `<span class="conf">${Math.round(f.confidence*100)}%</span>` : ''}
+        <div class="f-detail">${escapeHtml(f.detail)}${f.location ? ` <em>(${escapeHtml(f.location)})</em>` : ''}
+        ${f.verifier_note ? `<div class="fail-note">Verifier: ${escapeHtml(f.verifier_note)}</div>` : ''}</div>
+      </div>
+    </div>`;
+}
+
 function renderReview(){
   const panel = $('docReview');
+  const report = state.stats && state.stats.report;
+  if(report){ renderReport(panel, report); return; }
+  // Legacy path for jobs saved before the multi-agent report existed.
   const rv = (state.stats && state.stats.review) || null;
-  if(!rv || (rv.failed && !rv.findings.length)){
-    panel.style.display = 'none';
-    return;
-  }
+  if(!rv || (rv.failed && !(rv.findings||[]).length)){ panel.style.display = 'none'; return; }
   panel.style.display = 'block';
   const findings = rv.findings || [];
   let html = `<div class="panel-title">Document review &mdash; consistency, structure &amp; logic (${findings.length})</div>`;
   if(rv.verdict) html += `<div class="verdict">${escapeHtml(rv.verdict)}</div>`;
-  if(findings.length){
-    html += findings.map(f => `
-      <div class="finding ${f.severity==='major'?'major':''}">
-        <span class="sev-dot" title="${f.severity==='major'?'Major':'Minor'}"></span>
-        <div class="f-body">
-          <span class="f-title">${escapeHtml(f.title)}</span>
-          <span class="cat-chip">${escapeHtml(f.category)}</span>
-          <div class="f-detail">${escapeHtml(f.detail)}</div>
-        </div>
-      </div>`).join('');
-  }else{
-    html += `<div class="clean-note">No structural issues found &mdash; terminology, headings, and procedure logic are consistent.</div>`;
-  }
-  if(rv.truncated) html += `<div class="fail-note">Note: only the first part of a very long document was structurally reviewed.</div>`;
+  html += findings.length
+    ? findings.map(findingRow).join('')
+    : `<div class="clean-note">No structural issues found.</div>`;
   panel.innerHTML = html;
+}
+
+function renderReport(panel, report){
+  panel.style.display = 'block';
+  const s = report.summary || {};
+  const scores = report.scores || {};
+  const iso = report.iso || {};
+  let html = `<div class="panel-title" style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+    <span>Document review report &mdash; ${report.agents.length} specialist agents + verification</span>
+    ${s.risk_level ? `<span class="risk-badge risk-${s.risk_level}">Risk: ${s.risk_level}</span>` : ''}
+  </div>`;
+
+  html += `<div class="scores-row">` + SCORE_ORDER.filter(k => scores[k] != null).map(k =>
+    `<div class="score-tile ${k==='overall'?'overall':''}" title="${k} score out of 100">
+      <div class="s-label">${k}</div><div class="s-val">${scores[k]}</div></div>`).join('');
+  if(s.readability != null){
+    html += `<div class="score-tile" title="Readability out of 100">
+      <div class="s-label">readability</div><div class="s-val">${s.readability}</div></div>`;
+  }
+  html += `</div>`;
+
+  if(s.summary) html += `<div class="exec-summary">${escapeHtml(s.summary)}</div>`;
+  if((s.top_issues||[]).length){
+    html += `<ul class="top-issues">${s.top_issues.map(t => `<li>${escapeHtml(t)}</li>`).join('')}</ul>`;
+  }
+  if((iso.missing_sections||[]).length){
+    html += `<div class="fail-note">Missing ISO/QMS sections: ${iso.missing_sections.map(escapeHtml).join(', ')}.</div>`;
+  }
+
+  html += `<div class="findings-controls">
+    <button class="chip ${state.fSev==='all'?'on':''}" data-sev="all">All severities</button>
+    <button class="chip ${state.fSev==='major'?'on':''}" data-sev="major">Major</button>
+    <button class="chip ${state.fSev==='minor'?'on':''}" data-sev="minor">Minor</button>
+    <input id="findingSearch" type="text" placeholder="Search findings&hellip;" value="${escapeHtml(state.fQ)}" maxlength="120">
+  </div>
+  <div id="findingsList"></div>`;
+  panel.innerHTML = html;
+
+  panel.querySelectorAll('.findings-controls .chip').forEach(ch =>
+    ch.addEventListener('click', () => { state.fSev = ch.dataset.sev; renderReport(panel, report); }));
+  const search = panel.querySelector('#findingSearch');
+  search.addEventListener('input', () => { state.fQ = search.value; renderFindingsList(report); });
+  renderFindingsList(report);
+}
+
+function renderFindingsList(report){
+  const el = document.getElementById('findingsList');
+  if(!el) return;
+  const q = (state.fQ || '').toLowerCase();
+  const match = f =>
+    (state.fSev === 'all' || f.severity === state.fSev) &&
+    (!q || (f.title + ' ' + f.detail + ' ' + f.agent_label).toLowerCase().includes(q));
+  const verified = report.findings.filter(f => f.verified !== false && match(f));
+  const filtered = report.findings.filter(f => f.verified === false);
+  let html = '';
+  if(!report.findings.length){
+    html += `<div class="clean-note">No document-level issues found &mdash; terminology, structure, procedures, and logic are consistent.</div>`;
+  }else if(!verified.length){
+    html += `<div class="empty-msg">No records found.</div>`;
+  }else{
+    for(const a of report.agents){
+      const group = verified.filter(f => f.agent === a.key);
+      if(!group.length) continue;
+      html += `<div class="agent-group-title"><span>${escapeHtml(a.label)} (${group.length})</span>
+        ${a.verdict ? `<span class="g-verdict">${escapeHtml(a.verdict)}</span>` : ''}</div>`;
+      html += group.map(findingRow).join('');
+    }
+  }
+  if(filtered.length){
+    html += `<details class="fp-group"><summary>Filtered as likely false positives (${filtered.length})</summary>
+      ${filtered.map(findingRow).join('')}</details>`;
+  }
+  el.innerHTML = html;
 }
 
 function renderStats(){
@@ -822,6 +993,8 @@ function renderChanges(){
       <div class="meta">
         <span class="cat-chip">${escapeHtml(c.category)}</span>
         ${c.severity==='major' ? '<span class="sev-major" title="Major issue"></span>' : ''}
+        ${c.confidence != null ? `<span class="conf" title="Verifier confidence">${Math.round(c.confidence*100)}%</span>` : ''}
+        ${c.verified === false ? '<span class="filtered-tag" title="The verification agent flagged this as a likely false positive">auto-filtered</span>' : ''}
         <span class="spacer" style="flex:1"></span>
         ${c.accepted ? '<span class="accepted-tag">Accepted</span>' : '<span class="rejected-tag">Rejected</span>'}
       </div>
@@ -848,6 +1021,7 @@ function renderChanges(){
 function toggleChange(i){
   const c = state.changes[i];
   c.accepted = !c.accepted;
+  audit(c.accepted ? 'accept' : 'reject', `"${c.original}" -> "${c.corrected}"`);
   renderStats();
   renderChanges();
   if(view === 'clean'){ renderDoc(); }
@@ -895,28 +1069,131 @@ $('viewClean').addEventListener('click', () => {
 });
 $('acceptAllBtn').addEventListener('click', () => {
   state.changes.forEach(c => c.accepted = true);
+  audit('accept_all', `${state.changes.length} corrections`);
   renderAll(); toast('All corrections accepted.');
 });
 $('rejectAllBtn').addEventListener('click', () => {
   state.changes.forEach(c => c.accepted = false);
+  audit('reject_all', `${state.changes.length} corrections`);
   renderAll(); toast('All corrections rejected.');
 });
 $('copyBtn').addEventListener('click', async () => {
   try{
     await navigator.clipboard.writeText(cleanText());
+    audit('export', 'copy to clipboard');
     toast('Copied to clipboard.');
   }catch{ toast('Could not copy to clipboard.', true); }
 });
-$('downloadBtn').addEventListener('click', () => {
-  const base = (state.title || 'document').replace(/\.(txt|md|docx)$/i, '');
-  const blob = new Blob([cleanText()], {type:'text/plain;charset=utf-8'});
+
+function baseName(){ return (state.title || 'document').replace(/\.(txt|md|docx)$/i, ''); }
+function downloadBlob(content, filename, type){
+  const blob = content instanceof Blob ? content : new Blob([content], {type: type || 'text/plain;charset=utf-8'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `${base} (proofread).txt`;
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+$('downloadBtn').addEventListener('click', () => {
+  downloadBlob(cleanText(), `${baseName()} (proofread).txt`);
+  audit('export', 'txt');
   toast('Downloaded corrected text.');
 });
+
+/* -------- export menu -------- */
+const exportDropdown = $('exportDropdown');
+$('exportBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  exportDropdown.classList.toggle('open');
+});
+document.addEventListener('click', () => exportDropdown.classList.remove('open'));
+
+$('expDocx').addEventListener('click', async () => {
+  try{
+    const res = await fetch('/export/docx', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text: cleanText(), title: baseName() + ' (proofread)'})
+    });
+    if(!res.ok) throw new Error('Export failed.');
+    downloadBlob(await res.blob(), `${baseName()} (proofread).docx`);
+    audit('export', 'docx');
+    toast('Downloaded Word document.');
+  }catch(err){ toast(err.message || 'Export failed.', true); }
+});
+
+function buildMarkdownReport(){
+  const st = state.stats || {}, report = st.report || {};
+  const s = report.summary || {}, scores = report.scores || {};
+  const lines = [
+    `# Review report — ${state.title}`, '',
+    `Generated: ${new Date().toISOString().slice(0,10)}`, '',
+    state.summary ? `> ${state.summary}` : '', '',
+  ];
+  if(Object.keys(scores).length){
+    lines.push('## Scores', '', '| Area | Score |', '|---|---|');
+    SCORE_ORDER.filter(k => scores[k] != null).forEach(k => lines.push(`| ${k} | ${scores[k]}/100 |`));
+    lines.push('');
+  }
+  if(s.summary) lines.push('## Executive summary', '', s.summary, '');
+  if(s.risk_level) lines.push(`**Risk level:** ${s.risk_level}`, '');
+  if((s.top_issues||[]).length){
+    lines.push('**Top issues:**', '');
+    s.top_issues.forEach(t => lines.push(`- ${t}`));
+    lines.push('');
+  }
+  if((report.findings||[]).length){
+    lines.push('## Document-level findings', '');
+    for(const f of report.findings){
+      lines.push(`- **[${f.severity}] ${f.title}** (${f.agent_label}${f.verified === false ? ', filtered as likely false positive' : ''})`);
+      lines.push(`  ${f.detail}`);
+    }
+    lines.push('');
+  }
+  lines.push('## Corrections', '');
+  if(!state.changes.length) lines.push('None — the text is clean.');
+  for(const c of state.changes){
+    lines.push(`- [${c.accepted ? 'ACCEPTED' : 'REJECTED'}] (${c.category}) "${c.original}" → "${c.corrected}" — ${c.reason || ''}`);
+  }
+  return lines.join('\n');
+}
+
+function csvEscape(v){ v = String(v ?? ''); return '"' + v.replace(/"/g, '""') + '"'; }
+function buildCsv(){
+  const rows = [['type','agent_or_category','severity','title_or_original','detail_or_corrected','reason','confidence','status']];
+  for(const c of state.changes){
+    rows.push(['correction', c.category, c.severity, c.original, c.corrected, c.reason || '',
+      c.confidence ?? '', c.accepted ? 'accepted' : 'rejected']);
+  }
+  const report = (state.stats||{}).report || {};
+  for(const f of report.findings || []){
+    rows.push(['finding', f.agent_label, f.severity, f.title, f.detail, f.location || '',
+      f.confidence ?? '', f.verified === false ? 'filtered' : 'verified']);
+  }
+  return rows.map(r => r.map(csvEscape).join(',')).join('\n');
+}
+
+$('expMd').addEventListener('click', () => {
+  downloadBlob(buildMarkdownReport(), `${baseName()} review report.md`, 'text/markdown;charset=utf-8');
+  audit('export', 'markdown report'); toast('Downloaded Markdown report.');
+});
+$('expCsv').addEventListener('click', () => {
+  downloadBlob(buildCsv(), `${baseName()} findings.csv`, 'text/csv;charset=utf-8');
+  audit('export', 'csv'); toast('Downloaded CSV.');
+});
+$('expJson').addEventListener('click', () => {
+  downloadBlob(JSON.stringify({
+    title: state.title, id: state.id, summary: state.summary,
+    original_text: state.original, corrected_text: cleanText(),
+    changes: state.changes, stats: state.stats,
+  }, null, 2), `${baseName()} data.json`, 'application/json');
+  audit('export', 'json'); toast('Downloaded JSON.');
+});
+$('expAudit').addEventListener('click', () => {
+  downloadBlob(JSON.stringify({document: state.title, job_id: state.id, log: state.audit}, null, 2),
+    `${baseName()} audit log.json`, 'application/json');
+  toast('Downloaded audit log.');
+});
+$('expPrint').addEventListener('click', () => { audit('export', 'print'); window.print(); });
 
 /* ---------------- history drawer ---------------- */
 const drawer = $('drawer'), backdrop = $('drawerBackdrop');

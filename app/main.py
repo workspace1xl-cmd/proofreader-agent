@@ -73,9 +73,12 @@ async def proofread_stream(req: ProofreadRequest):
     async def progress(done: int, total: int):
         await queue.put({"type": "progress", "done": done, "total": total})
 
+    async def agent_status(key: str, label: str, state: str):
+        await queue.put({"type": "agent", "key": key, "label": label, "state": state})
+
     async def run():
         try:
-            result = await run_pipeline(req.text, progress)
+            result = await run_pipeline(req.text, progress, agent_status)
             saved = save_job(req.text, result)
             await queue.put(
                 {"type": "result", "payload": {"id": saved.get("id"), **result}}
@@ -157,6 +160,33 @@ async def extract_endpoint(file: UploadFile = File(...)):
     if not text.strip():
         raise HTTPException(status_code=400, detail="The file contains no text.")
     return {"filename": file.filename, "text": text, "chars": len(text)}
+
+
+class ExportRequest(BaseModel):
+    text: str
+    title: str = "Proofread document"
+
+
+@app.post("/export/docx")
+def export_docx(req: ExportRequest):
+    """Render corrected text as a downloadable Word document."""
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail="Text must not be empty.")
+    from docx import Document
+
+    doc = Document()
+    doc.add_heading(req.title[:120], level=1)
+    for para in req.text.split("\n\n"):
+        doc.add_paragraph(para)
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    safe_name = "".join(c for c in req.title if c.isalnum() or c in " -_")[:60] or "document"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.docx"'},
+    )
 
 
 @app.get("/jobs/{job_id}")
