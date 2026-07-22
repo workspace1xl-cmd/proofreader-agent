@@ -182,8 +182,11 @@ Return ONLY valid JSON, nothing else:
 async def run_doc_agent(client: httpx.AsyncClient, agent: dict, text: str) -> dict:
     """Run one document-level agent. Returns normalised {findings, verdict, ...}."""
     parsed = await call_json(client, agent["prompt"], text, max_tokens=4096)
-    if parsed is None or not isinstance(parsed.get("findings"), list):
+    if parsed is None:
         return {"findings": [], "verdict": "", "failed": True}
+    # Tolerate shape drift: valid JSON without a findings list means "no findings".
+    if not isinstance(parsed.get("findings"), list):
+        parsed["findings"] = []
     parsed.setdefault("verdict", "")
     return parsed
 

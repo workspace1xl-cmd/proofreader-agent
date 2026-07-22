@@ -852,6 +852,10 @@ function renderReport(panel, report){
   if((iso.missing_sections||[]).length){
     html += `<div class="fail-note">Missing ISO/QMS sections: ${iso.missing_sections.map(escapeHtml).join(', ')}.</div>`;
   }
+  const failedAgents = report.agents.filter(a => a.status === 'failed');
+  if(failedAgents.length){
+    html += `<div class="fail-note">Note: ${failedAgents.map(a => escapeHtml(a.label)).join(', ')} could not complete &mdash; ${failedAgents.length === 1 ? 'that dimension' : 'those dimensions'} may be under-reported. Re-run to retry.</div>`;
+  }
 
   html += `<div class="findings-controls">
     <button class="chip ${state.fSev==='all'?'on':''}" data-sev="all">All severities</button>

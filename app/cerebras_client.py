@@ -101,10 +101,10 @@ async def call_json(
     user: str,
     max_tokens: int = 4096,
     temperature: float = 0.1,
-    attempts: int = 2,
+    attempts: int = 4,
 ) -> dict | None:
-    """One structured-JSON model call with retries. Returns None if every
-    attempt fails to produce parseable JSON — callers degrade gracefully."""
+    """One structured-JSON model call with retries and 429/503 backoff.
+    Returns None if every attempt fails — callers degrade gracefully."""
     if not CEREBRAS_API_KEY:
         raise RuntimeError(
             "CEREBRAS_API_KEY is not set. Create a key at cloud.cerebras.ai and export it."
@@ -125,6 +125,14 @@ async def call_json(
     for attempt in range(attempts):
         try:
             resp = await client.post(CEREBRAS_URL, headers=headers, json=payload)
+            if resp.status_code in (429, 503):
+                # Rate-limited or at capacity: honour Retry-After, capped.
+                try:
+                    delay = float(resp.headers.get("retry-after") or 0)
+                except ValueError:
+                    delay = 0
+                await asyncio.sleep(min(max(delay, 2.5 * (attempt + 1)), 25))
+                continue
             resp.raise_for_status()
             data = resp.json()
             parsed = _parse_response(data["choices"][0]["message"]["content"])
@@ -133,109 +141,41 @@ async def call_json(
         except (httpx.HTTPError, KeyError, IndexError):
             pass
         if attempt < attempts - 1:
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2.0 * (attempt + 1))
     return None
 
 
-async def proofread_chunk(client: httpx.AsyncClient, text: str, attempts: int = 3) -> dict:
-    """Proofread one chunk of text. Returns the parsed model response.
-
-    Retries on transient HTTP errors and on malformed JSON. Falls back to a
-    no-op result (input returned unchanged) if every attempt fails to parse,
-    so one bad chunk never sinks a whole document.
-    """
-    if not CEREBRAS_API_KEY:
-        raise RuntimeError(
-            "CEREBRAS_API_KEY is not set. Create a key at cloud.cerebras.ai and export it."
-        )
-
-    payload = {
-        "model": MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text},
-        ],
-        "temperature": 0.1,
-        "max_tokens": 8192,
-    }
-    headers = {
-        "Authorization": f"Bearer {CEREBRAS_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    last_error: Exception | None = None
-    for attempt in range(attempts):
-        try:
-            resp = await client.post(CEREBRAS_URL, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            raw = data["choices"][0]["message"]["content"]
-            parsed = _parse_response(raw)
-            if parsed is not None and "corrected_text" in parsed:
-                parsed.setdefault("changes", [])
-                parsed.setdefault("summary", "")
-                return parsed
-            last_error = ValueError("model returned non-JSON output")
-        except (httpx.HTTPError, KeyError, IndexError) as e:
-            last_error = e
-        if attempt < attempts - 1:
-            await asyncio.sleep(1.5 * (attempt + 1))
-
-    # Every attempt failed — degrade gracefully rather than erroring the job.
+async def proofread_chunk(client: httpx.AsyncClient, text: str, attempts: int = 4) -> dict:
+    """Proofread one chunk of text. Falls back to a no-op result (input
+    returned unchanged) if every attempt fails, so one bad chunk never sinks
+    a whole document."""
+    parsed = await call_json(
+        client, SYSTEM_PROMPT, text, max_tokens=8192, attempts=attempts
+    )
+    if parsed is not None and "corrected_text" in parsed:
+        parsed.setdefault("changes", [])
+        parsed.setdefault("summary", "")
+        return parsed
     return {
         "corrected_text": text,
         "changes": [],
-        "summary": f"This section could not be analysed ({last_error}).",
+        "summary": "This section could not be analysed (model unavailable).",
     }
 
 
 DOC_REVIEW_MAX_CHARS = 30_000
 
 
-async def review_document(client: httpx.AsyncClient, text: str, attempts: int = 2) -> dict:
-    """Whole-document structural review: terminology/role consistency, heading
-    conventions, procedural logic (decision branches), cross-section consistency.
-
-    Degrades to an empty review on failure — never sinks the job.
-    """
-    if not CEREBRAS_API_KEY:
-        raise RuntimeError(
-            "CEREBRAS_API_KEY is not set. Create a key at cloud.cerebras.ai and export it."
-        )
-
-    doc = text
-    truncated = False
-    if len(doc) > DOC_REVIEW_MAX_CHARS:
-        doc = doc[:DOC_REVIEW_MAX_CHARS]
-        truncated = True
-
-    payload = {
-        "model": MODEL,
-        "messages": [
-            {"role": "system", "content": DOC_REVIEW_PROMPT},
-            {"role": "user", "content": doc},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 4096,
-    }
-    headers = {
-        "Authorization": f"Bearer {CEREBRAS_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    for attempt in range(attempts):
-        try:
-            resp = await client.post(CEREBRAS_URL, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            parsed = _parse_response(data["choices"][0]["message"]["content"])
-            if parsed is not None and isinstance(parsed.get("findings"), list):
-                parsed.setdefault("verdict", "")
-                parsed["truncated"] = truncated
-                return parsed
-        except (httpx.HTTPError, KeyError, IndexError):
-            pass
-        if attempt < attempts - 1:
-            await asyncio.sleep(1.5)
-
+async def review_document(client: httpx.AsyncClient, text: str, attempts: int = 3) -> dict:
+    """Legacy single-call structural review, kept for API compatibility.
+    Degrades to an empty review on failure — never sinks the job."""
+    truncated = len(text) > DOC_REVIEW_MAX_CHARS
+    doc = text[:DOC_REVIEW_MAX_CHARS]
+    parsed = await call_json(
+        client, DOC_REVIEW_PROMPT, doc, max_tokens=4096, temperature=0.2, attempts=attempts
+    )
+    if parsed is not None and isinstance(parsed.get("findings"), list):
+        parsed.setdefault("verdict", "")
+        parsed["truncated"] = truncated
+        return parsed
     return {"findings": [], "verdict": "", "truncated": truncated, "failed": True}
