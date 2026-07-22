@@ -693,7 +693,7 @@ async function streamProofread(text){
         progressFill.style.width = pct + '%';
         if(ev.total > 1){
           clearInterval(spinTimer);
-          progressStatus.textContent = `Analysing section ${Math.min(ev.done + 1, ev.total)} of ${ev.total}…`;
+          progressStatus.textContent = `Running review tasks… ${ev.done} of ${ev.total} complete`;
         }
       }else if(ev.type === 'agent'){
         upsertAgent(ev);
