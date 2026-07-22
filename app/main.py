@@ -103,6 +103,36 @@ async def proofread_stream(req: ProofreadRequest):
     )
 
 
+def _extract_docx(data: bytes) -> str:
+    """Extract paragraphs AND tables from a .docx, in document order.
+
+    Tables matter for SOP-style documents: the structural review cross-checks
+    prose steps against procedure tables, so they must reach the model.
+    Table rows are rendered as pipe-separated lines.
+    """
+    from docx import Document
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    doc = Document(io.BytesIO(data))
+    parts: list[str] = []
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            t = Paragraph(child, doc).text
+            if t.strip():
+                parts.append(t)
+        elif child.tag == qn("w:tbl"):
+            rows = []
+            for row in Table(child, doc).rows:
+                cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+                if any(cells):
+                    rows.append("| " + " | ".join(cells) + " |")
+            if rows:
+                parts.append("\n".join(rows))
+    return "\n\n".join(parts)
+
+
 @app.post("/extract")
 async def extract_endpoint(file: UploadFile = File(...)):
     """Extract plain text from an uploaded .txt, .md, or .docx file."""
@@ -112,10 +142,7 @@ async def extract_endpoint(file: UploadFile = File(...)):
         raise HTTPException(status_code=413, detail="File too large (max 2 MB).")
     if name.endswith(".docx"):
         try:
-            from docx import Document
-
-            doc = Document(io.BytesIO(data))
-            text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            text = _extract_docx(data)
         except Exception:
             raise HTTPException(
                 status_code=400, detail="Could not read this .docx file."
