@@ -13,7 +13,7 @@ import re
 
 import httpx
 
-from app.cerebras_client import proofread_chunk
+from app.cerebras_client import proofread_chunk, review_document
 
 MAX_CHARS = 100_000
 CHUNK_TARGET = 6_000
@@ -137,11 +137,38 @@ def build_stats(text: str, changes: list[dict], chunk_count: int) -> dict:
     }
 
 
+REVIEW_CATEGORIES = ("terminology", "structure", "logic", "consistency")
+
+
+def _normalise_review(review: dict) -> dict:
+    findings = []
+    for f in review.get("findings") or []:
+        if not isinstance(f, dict):
+            continue
+        cat = str(f.get("category") or "").strip().lower()
+        findings.append(
+            {
+                "title": str(f.get("title") or "Finding").strip(),
+                "detail": str(f.get("detail") or "").strip(),
+                "category": cat if cat in REVIEW_CATEGORIES else "consistency",
+                "severity": _normalise_severity(f.get("severity")),
+            }
+        )
+    return {
+        "findings": findings,
+        "verdict": str(review.get("verdict") or "").strip(),
+        "truncated": bool(review.get("truncated")),
+        "failed": bool(review.get("failed")),
+    }
+
+
 async def run_pipeline(text: str, progress=None) -> dict:
-    """Proofread a full document. `progress(done, total)` is awaited per chunk."""
+    """Proofread a full document. `progress(done, total)` is awaited per unit of
+    work: one unit per chunk plus one for the whole-document structural review."""
     spans = split_spans(text)
-    total = len(spans)
-    results: list[dict | None] = [None] * total
+    total = len(spans) + 1  # +1 for the document-level review pass
+    results: list[dict | None] = [None] * len(spans)
+    review: dict = {}
     done = 0
     sem = asyncio.Semaphore(CONCURRENCY)
 
@@ -160,7 +187,14 @@ async def run_pipeline(text: str, progress=None) -> dict:
             if progress:
                 await progress(done, total)
 
-        await asyncio.gather(*(work(i) for i in range(total)))
+        async def doc_review():
+            nonlocal done, review
+            review = await review_document(client, text)
+            done += 1
+            if progress:
+                await progress(done, total)
+
+        await asyncio.gather(*(work(i) for i in range(len(spans))), doc_review())
 
     all_changes: list[dict] = []
     corrected_parts: list[str] = []
@@ -171,9 +205,11 @@ async def run_pipeline(text: str, progress=None) -> dict:
         all_changes.extend(anchor_changes(chunk_text, res.get("changes") or [], s))
 
     changes = drop_overlaps(all_changes)
-    stats = build_stats(text, changes, total)
+    n_chunks = len(spans)
+    stats = build_stats(text, changes, n_chunks)
+    stats["review"] = _normalise_review(review)
 
-    if total == 1 and (results[0] or {}).get("summary"):
+    if n_chunks == 1 and (results[0] or {}).get("summary"):
         summary = str(results[0]["summary"]).strip()
     elif stats["issues"] == 0:
         summary = f"No issues found across {stats['words']:,} words."
@@ -181,8 +217,8 @@ async def run_pipeline(text: str, progress=None) -> dict:
         summary = (
             f"{stats['issues']:,} suggested correction"
             f"{'s' if stats['issues'] != 1 else ''} "
-            f"across {stats['words']:,} words in {total} section"
-            f"{'s' if total != 1 else ''}."
+            f"across {stats['words']:,} words in {n_chunks} section"
+            f"{'s' if n_chunks != 1 else ''}."
         )
 
     return {

@@ -13,6 +13,9 @@ deployable free on Render.
 1. **Ingest** — paste text, or upload / drag-and-drop `.txt`, `.md`, `.docx` (extracted server-side).
 2. **Chunk** — long documents (up to 100,000 chars) are split on paragraph/sentence boundaries into ~6k-char sections.
 3. **Analyse** — sections are proofread concurrently on Cerebras; progress streams to the browser live (SSE).
+   In parallel, a **whole-document structural review** checks terminology/role consistency, heading
+   conventions, procedural logic (e.g. decision points missing a No branch), and cross-section
+   consistency (prose steps vs tables/flowcharts) — reported as advisory findings, not auto-edits.
 4. **Anchor** — every change is located at an exact character offset in the original, so the UI renders true inline markup.
 5. **Review** — accept/reject each correction (inline or from the sidebar), filter by category, see stats and a category breakdown.
 6. **Export** — copy the corrected text or download it as `.txt`; only *accepted* changes are applied.
@@ -110,6 +113,21 @@ Each entry in `changes[]`:
 ```
 `start`/`end` are character offsets into the original text (`null` if the snippet
 could not be located — such changes are listed but not auto-applied).
+
+`stats.review` holds the document-level structural review:
+```json
+{
+  "findings": [
+    {"title": "...", "detail": "...", "category": "terminology|structure|logic|consistency", "severity": "minor|major"}
+  ],
+  "verdict": "one-sentence structural assessment",
+  "truncated": false
+}
+```
+The correction pass is also tuned against false positives: it will not rename
+roles/titles/defined terms, will not impose optional style (e.g. the Oxford
+comma or colons on headings) unless the document is internally inconsistent,
+and prefers fewer high-confidence corrections over marginal ones.
 
 ## What this does NOT do
 

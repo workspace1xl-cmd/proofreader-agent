@@ -148,6 +148,6 @@ def list_jobs_endpoint(limit: int = 20):
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return FileResponse("static/index.html")

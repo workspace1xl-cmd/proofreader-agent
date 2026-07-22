@@ -36,6 +36,42 @@ Rules:
 - Never fabricate changes. Only list changes you actually made.
 - Preserve original paragraph breaks and formatting exactly.
 - List changes in the order they appear in the text.
+- NEVER suggest renaming roles, job titles, department names, product names, section headings, or defined terms (e.g. do not shorten "Graphic Design Manager" to "Design Manager"). If the text uses two variants of the same name, align the minority variant to the dominant one and categorise it as "consistency".
+- Do NOT impose optional style preferences. The serial (Oxford) comma, colons after headings, capitalisation style in titles, and similar choices are only errors if the text is internally inconsistent about them.
+- Do NOT add punctuation to headings, labels, table cells, or list items to match your own style.
+- Prioritise genuine grammar, agreement, and word-choice errors over marginal punctuation tweaks.
+- Prefer fewer, high-confidence corrections over many debatable ones. If a change is debatable, omit it.
+"""
+
+DOC_REVIEW_PROMPT = """You are a senior documentation reviewer (ISO 9001 / QMS style). You receive a \
+full document that has already been through mechanical proofreading — do NOT list spelling, grammar, \
+or punctuation fixes. Instead, review the document as a whole for:
+
+1. Terminology and role consistency — the same role, department, or defined term should be named \
+identically everywhere. Flag variants and state which form dominates.
+2. Heading and formatting consistency — numbering, colon usage, capitalisation patterns across \
+sections should match.
+3. Procedural logic — steps should be in a workable order; every decision point (e.g. "Approved?") \
+must have all branches (a Yes path needs a No path); no dead ends; referenced sections, tables, or \
+attachments must exist in the document.
+4. Cross-section consistency — if a process is described both as prose steps and in a table, \
+checklist, or flowchart, they must describe the same process, roles, and order.
+
+Return ONLY valid JSON, nothing else, no markdown fences:
+{
+  "findings": [
+    {
+      "title": "<short name of the issue>",
+      "detail": "<what is wrong and where, in plain language, with a concrete recommendation>",
+      "category": "<terminology|structure|logic|consistency>",
+      "severity": "<minor|major>"
+    }
+  ],
+  "verdict": "<one sentence on overall document quality from a structural point of view>"
+}
+
+Only report real findings you can point to in the text. An empty findings array is a valid answer \
+for a clean document. Never invent issues to seem thorough.
 """
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -109,3 +145,55 @@ async def proofread_chunk(client: httpx.AsyncClient, text: str, attempts: int = 
         "changes": [],
         "summary": f"This section could not be analysed ({last_error}).",
     }
+
+
+DOC_REVIEW_MAX_CHARS = 30_000
+
+
+async def review_document(client: httpx.AsyncClient, text: str, attempts: int = 2) -> dict:
+    """Whole-document structural review: terminology/role consistency, heading
+    conventions, procedural logic (decision branches), cross-section consistency.
+
+    Degrades to an empty review on failure — never sinks the job.
+    """
+    if not CEREBRAS_API_KEY:
+        raise RuntimeError(
+            "CEREBRAS_API_KEY is not set. Create a key at cloud.cerebras.ai and export it."
+        )
+
+    doc = text
+    truncated = False
+    if len(doc) > DOC_REVIEW_MAX_CHARS:
+        doc = doc[:DOC_REVIEW_MAX_CHARS]
+        truncated = True
+
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": DOC_REVIEW_PROMPT},
+            {"role": "user", "content": doc},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 4096,
+    }
+    headers = {
+        "Authorization": f"Bearer {CEREBRAS_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    for attempt in range(attempts):
+        try:
+            resp = await client.post(CEREBRAS_URL, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            parsed = _parse_response(data["choices"][0]["message"]["content"])
+            if parsed is not None and isinstance(parsed.get("findings"), list):
+                parsed.setdefault("verdict", "")
+                parsed["truncated"] = truncated
+                return parsed
+        except (httpx.HTTPError, KeyError, IndexError):
+            pass
+        if attempt < attempts - 1:
+            await asyncio.sleep(1.5)
+
+    return {"findings": [], "verdict": "", "truncated": truncated, "failed": True}

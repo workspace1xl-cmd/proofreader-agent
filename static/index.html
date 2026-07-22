@@ -172,6 +172,27 @@
   .cat-row .cat-count{ font-family:'Courier New', monospace; font-size:12px; color:var(--ink-soft); text-align:right; }
   .cat-row.active .cat-name{ color:var(--pen); font-weight:bold; }
 
+  .doc-review{
+    background:var(--card); border:1px solid var(--line); border-radius:6px;
+    padding:14px 16px; box-shadow:var(--shadow); margin-bottom:22px;
+  }
+  .doc-review .panel-title{ font-family:'Courier New', monospace; font-size:11px; letter-spacing:.1em;
+    text-transform:uppercase; color:var(--ink-faint); margin-bottom:4px; }
+  .doc-review .verdict{ font-style:italic; color:var(--ink-soft); font-size:14px; margin:6px 0 10px; }
+  .finding{ display:flex; gap:10px; align-items:flex-start; padding:10px 0;
+    border-top:1px dashed var(--line-soft); font-size:14px; }
+  .finding .sev-dot{ width:8px; height:8px; border-radius:50%; margin-top:6px; flex-shrink:0;
+    background:var(--ink-faint); }
+  .finding.major .sev-dot{ background:var(--pen); }
+  .finding .f-body{ min-width:0; }
+  .finding .f-title{ font-weight:bold; margin-right:8px; }
+  .finding .f-detail{ color:var(--ink-soft); line-height:1.55; margin-top:2px; }
+  .doc-review .clean-note{
+    background:var(--ok-soft); border:1px solid var(--ok); border-radius:4px;
+    color:var(--ok); padding:10px 14px; font-size:14px; margin-top:8px;
+  }
+  .doc-review .fail-note{ color:var(--ink-faint); font-style:italic; font-size:13px; margin-top:8px; }
+
   .review-grid{ display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:22px; align-items:start; }
   @media (max-width: 900px){ .review-grid{ grid-template-columns:1fr; } }
 
@@ -339,7 +360,7 @@
   <!-- ============ EDITOR ============ -->
   <section id="editor">
     <div class="hero">
-      <div class="eyebrow">Grammar &middot; Spelling &middot; Punctuation &middot; Clarity &middot; Consistency</div>
+      <div class="eyebrow">Grammar &middot; Spelling &middot; Punctuation &middot; Clarity &middot; Consistency &middot; Structure</div>
       <h2>Mark it up.</h2>
       <p>Paste text or drop a file. The agent reads the whole document, marks every issue inline,
       and lets you accept or reject each correction before you export.</p>
@@ -377,6 +398,7 @@
 
     <div class="stats-row" id="statsRow"></div>
     <div class="cat-chart" id="catChart"></div>
+    <div class="doc-review" id="docReview" style="display:none;"></div>
 
     <div class="review-grid">
       <div class="doc-card">
@@ -676,7 +698,35 @@ function cleanText(){
   return out + state.original.slice(pos);
 }
 
-function renderAll(){ renderStats(); renderChart(); renderDoc(); renderChanges(); }
+function renderAll(){ renderStats(); renderChart(); renderReview(); renderDoc(); renderChanges(); }
+
+function renderReview(){
+  const panel = $('docReview');
+  const rv = (state.stats && state.stats.review) || null;
+  if(!rv || (rv.failed && !rv.findings.length)){
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = 'block';
+  const findings = rv.findings || [];
+  let html = `<div class="panel-title">Document review &mdash; consistency, structure &amp; logic (${findings.length})</div>`;
+  if(rv.verdict) html += `<div class="verdict">${escapeHtml(rv.verdict)}</div>`;
+  if(findings.length){
+    html += findings.map(f => `
+      <div class="finding ${f.severity==='major'?'major':''}">
+        <span class="sev-dot" title="${f.severity==='major'?'Major':'Minor'}"></span>
+        <div class="f-body">
+          <span class="f-title">${escapeHtml(f.title)}</span>
+          <span class="cat-chip">${escapeHtml(f.category)}</span>
+          <div class="f-detail">${escapeHtml(f.detail)}</div>
+        </div>
+      </div>`).join('');
+  }else{
+    html += `<div class="clean-note">No structural issues found &mdash; terminology, headings, and procedure logic are consistent.</div>`;
+  }
+  if(rv.truncated) html += `<div class="fail-note">Note: only the first part of a very long document was structurally reviewed.</div>`;
+  panel.innerHTML = html;
+}
 
 function renderStats(){
   const s = state.stats, n = state.changes.length;
