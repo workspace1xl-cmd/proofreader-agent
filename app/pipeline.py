@@ -1,135 +1,219 @@
-"""End-to-end proofreading pipeline.
-
-Splits long documents into chunks on natural boundaries, proofreads chunks
-concurrently, anchors every change to a character offset in the original text
-(so the UI can render inline markup and apply accept/reject decisions), and
-computes document statistics.
-"""
+"""Concurrent, deterministic document-review orchestration."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import httpx
 
-from app.agents import (
-    DOC_AGENTS,
-    run_doc_agent,
-    run_summary,
-    run_verifier,
+from app.agents import DOC_AGENTS, run_doc_agent, run_summary, run_verifier
+from app.cerebras_client import proofread_chunk
+from app.config import (
+    CHUNK_CONTEXT,
+    CHUNK_TARGET,
+    MODEL_TIMEOUT_SECONDS,
+    PIPELINE_CONCURRENCY,
 )
-from app.cerebras_client import proofread_chunk, review_document  # noqa: F401 (review_document kept for API compat)
 
-MAX_CHARS = 100_000
-CHUNK_TARGET = 6_000
-CONCURRENCY = 4
+logger = logging.getLogger(__name__)
 
 CATEGORIES = ("grammar", "spelling", "punctuation", "clarity", "consistency")
-
-_WORD_RE = re.compile(r"[\w'’-]+")
+_WORD_RE = re.compile(r"[\w'\u2019-]+", re.UNICODE)
 _SENTENCE_RE = re.compile(r"[.!?]+(?:\s|$)")
+_SEV_PENALTY = {"minor": 2, "major": 6}
+_SCORE_WEIGHTS = {
+    "grammar": 0.20,
+    "spelling": 0.10,
+    "punctuation": 0.10,
+    "consistency": 0.15,
+    "structure": 0.10,
+    "procedure": 0.15,
+    "logic": 0.10,
+    "iso": 0.10,
+}
+
+ProgressCallback = Callable[[int, int], Awaitable[None]]
+StatusCallback = Callable[[str, str, str], Awaitable[None]]
 
 
 def split_spans(text: str) -> list[tuple[int, int]]:
-    """Split text into (start, end) spans of ~CHUNK_TARGET chars.
+    """Tile text with natural-boundary chunks and no lost characters."""
 
-    Spans tile the whole string with no gaps, so global character offsets are
-    preserved. Cuts prefer paragraph breaks, then sentence ends, then spaces.
-    """
+    if not text:
+        return [(0, 0)]
     spans: list[tuple[int, int]] = []
     start = 0
-    n = len(text)
-    while n - start > CHUNK_TARGET:
+    while len(text) - start > CHUNK_TARGET:
         window_end = start + CHUNK_TARGET
-        cut = text.rfind("\n\n", start + 1, window_end)
-        if cut > start:
+        minimum = start + max(1, CHUNK_TARGET // 2)
+        candidates = (
+            text.rfind("\n\n", minimum, window_end),
+            text.rfind(". ", minimum, window_end),
+            text.rfind("! ", minimum, window_end),
+            text.rfind("? ", minimum, window_end),
+            text.rfind("\n", minimum, window_end),
+            text.rfind(" ", minimum, window_end),
+        )
+        cut = max(candidates)
+        if cut < minimum:
+            cut = window_end
+        elif text[cut : cut + 2] in {"\n\n", ". ", "! ", "? "}:
             cut += 2
         else:
-            m = text.rfind(". ", start + 1, window_end)
-            if m > start:
-                cut = m + 2
-            else:
-                sp = text.rfind(" ", start + 1, window_end)
-                cut = sp + 1 if sp > start else window_end
+            cut += 1
         spans.append((start, cut))
         start = cut
-    spans.append((start, n))
+    spans.append((start, len(text)))
     return spans
 
 
-def _normalise_category(value) -> str:
-    v = str(value or "").strip().lower()
-    return v if v in CATEGORIES else "clarity"
+def _normalise_category(value: Any) -> str:
+    category = str(value or "").strip().lower()
+    return category if category in CATEGORIES else "clarity"
 
 
-def _normalise_severity(value) -> str:
+def _normalise_severity(value: Any) -> str:
     return "major" if str(value or "").strip().lower() == "major" else "minor"
 
 
-def anchor_changes(chunk_text: str, changes: list, offset: int) -> list[dict]:
-    """Attach global start/end character offsets to each change.
+def _find_flexible(text: str, snippet: str, start: int) -> tuple[int, int] | None:
+    """Locate a snippet despite harmless whitespace drift in model output."""
 
-    Snippets are searched for in document order (a moving cursor), falling back
-    to a whole-chunk search. Changes that cannot be located get start/end None
-    and are shown in the list but not in the inline markup.
-    """
-    anchored = []
+    parts = re.split(r"(\s+)", snippet)
+    pattern = "".join(r"\s+" if part.isspace() else re.escape(part) for part in parts)
+    try:
+        match = re.search(pattern, text[start:])
+        if match is None and start:
+            match = re.search(pattern, text)
+            base = 0
+        else:
+            base = start
+    except re.error:
+        return None
+    return None if match is None else (base + match.start(), base + match.end())
+
+
+def anchor_changes(
+    chunk_text: str, changes: list[Any], offset: int
+) -> list[dict[str, Any]]:
+    """Normalize model changes and attach exact offsets into the original document."""
+
+    anchored: list[dict[str, Any]] = []
     cursor = 0
-    for ch in changes:
-        if not isinstance(ch, dict):
+    for raw in changes:
+        if not isinstance(raw, dict):
             continue
-        original = str(ch.get("original") or "")
-        corrected = str(ch.get("corrected") or "")
+        original = str(raw.get("original") or "")
+        corrected = str(raw.get("corrected") or "")
         if not original or original == corrected:
             continue
-        idx = chunk_text.find(original, cursor)
-        if idx == -1:
-            idx = chunk_text.find(original)
-        entry = {
+        start = chunk_text.find(original, cursor)
+        end = start + len(original) if start >= 0 else -1
+        if start < 0:
+            start = chunk_text.find(original)
+            end = start + len(original) if start >= 0 else -1
+        if start < 0 and any(char.isspace() for char in original):
+            flexible = _find_flexible(chunk_text, original, cursor)
+            if flexible is not None:
+                start, end = flexible
+                original = chunk_text[start:end]
+        entry: dict[str, Any] = {
             "original": original,
             "corrected": corrected,
-            "category": _normalise_category(ch.get("category") or ch.get("reason")),
-            "reason": str(ch.get("reason") or ""),
-            "severity": _normalise_severity(ch.get("severity")),
+            "category": _normalise_category(raw.get("category")),
+            "reason": str(raw.get("reason") or "").strip(),
+            "severity": _normalise_severity(raw.get("severity")),
+            "start": None,
+            "end": None,
+            "verified": None,
+            "confidence": None,
         }
-        if idx == -1:
-            entry["start"] = None
-            entry["end"] = None
-        else:
-            entry["start"] = offset + idx
-            entry["end"] = offset + idx + len(original)
-            cursor = idx + len(original)
+        if start >= 0:
+            entry["start"] = offset + start
+            entry["end"] = offset + end
+            cursor = end
         anchored.append(entry)
     return anchored
 
 
-def drop_overlaps(changes: list[dict]) -> list[dict]:
-    """Sort anchored changes by position and drop any that overlap a kept one."""
+def dedupe_changes(changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[Any, ...]] = set()
+    output: list[dict[str, Any]] = []
+    for change in changes:
+        key = (
+            change.get("start"),
+            change.get("end"),
+            change["original"].casefold(),
+            change["corrected"].casefold(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(change)
+    return output
+
+
+def resolve_overlaps(changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the strongest verified correction from each overlapping group."""
+
     anchored = sorted(
-        (c for c in changes if c["start"] is not None), key=lambda c: c["start"]
+        (change for change in changes if change.get("start") is not None),
+        key=lambda change: (int(change["start"]), int(change["end"])),
     )
-    unanchored = [c for c in changes if c["start"] is None]
-    kept: list[dict] = []
-    prev_end = -1
-    for c in anchored:
-        if c["start"] >= prev_end:
-            kept.append(c)
-            prev_end = c["end"]
+    unanchored = [change for change in changes if change.get("start") is None]
+    groups: list[list[dict[str, Any]]] = []
+    for change in anchored:
+        if not groups or int(change["start"]) >= max(
+            int(item["end"]) for item in groups[-1]
+        ):
+            groups.append([change])
         else:
-            c = {**c, "start": None, "end": None}
-            unanchored.append(c)
-    return kept + unanchored
+            groups[-1].append(change)
+
+    def rank(change: dict[str, Any]) -> tuple[int, float, int, int]:
+        verification = 2 if change.get("verified") is True else 1
+        confidence = float(change.get("confidence") or 0.0)
+        severity = 1 if change["severity"] == "major" else 0
+        span = int(change["end"]) - int(change["start"])
+        return verification, confidence, severity, span
+
+    return [max(group, key=rank) for group in groups] + unanchored
 
 
-def build_stats(text: str, changes: list[dict], chunk_count: int) -> dict:
+def _norm_title(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def dedupe_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove strong duplicates using normalized title plus location."""
+
+    seen: set[tuple[str, str]] = set()
+    output: list[dict[str, Any]] = []
+    for finding in findings:
+        title = _norm_title(str(finding.get("title") or ""))
+        location = _norm_title(str(finding.get("location") or ""))
+        key = (title, location)
+        if title and key in seen:
+            continue
+        seen.add(key)
+        output.append(finding)
+    return output
+
+
+def build_stats(
+    text: str, changes: list[dict[str, Any]], chunk_count: int
+) -> dict[str, Any]:
     words = len(_WORD_RE.findall(text))
     sentences = max(1, len(_SENTENCE_RE.findall(text)))
-    by_category = {c: 0 for c in CATEGORIES}
+    by_category = {category: 0 for category in CATEGORIES}
     by_severity = {"minor": 0, "major": 0}
-    for ch in changes:
-        by_category[ch["category"]] += 1
-        by_severity[ch["severity"]] += 1
+    for change in changes:
+        by_category[change["category"]] += 1
+        by_severity[change["severity"]] += 1
     issues = len(changes)
     return {
         "words": words,
@@ -137,289 +221,343 @@ def build_stats(text: str, changes: list[dict], chunk_count: int) -> dict:
         "chars": len(text),
         "chunks": chunk_count,
         "issues": issues,
+        "verified_issues": sum(change.get("verified") is True for change in changes),
+        "unverified_issues": sum(change.get("verified") is None for change in changes),
         "issues_per_100_words": round(issues * 100 / words, 1) if words else 0.0,
         "by_category": by_category,
         "by_severity": by_severity,
     }
 
 
-REVIEW_CATEGORIES = ("terminology", "structure", "logic", "consistency")
-
-
-def _normalise_review(review: dict) -> dict:
-    findings = []
-    for f in review.get("findings") or []:
-        if not isinstance(f, dict):
-            continue
-        cat = str(f.get("category") or "").strip().lower()
-        findings.append(
-            {
-                "title": str(f.get("title") or "Finding").strip(),
-                "detail": str(f.get("detail") or "").strip(),
-                "category": cat if cat in REVIEW_CATEGORIES else "consistency",
-                "severity": _normalise_severity(f.get("severity")),
-            }
-        )
-    return {
-        "findings": findings,
-        "verdict": str(review.get("verdict") or "").strip(),
-        "truncated": bool(review.get("truncated")),
-        "failed": bool(review.get("failed")),
-    }
-
-
-def _norm_title(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
-
-
-def dedupe_findings(findings: list[dict]) -> list[dict]:
-    """Drop findings whose normalised title duplicates an earlier one (across
-    agents too — two agents reporting the same defect is one finding)."""
-    seen: set[str] = set()
-    out = []
-    for f in findings:
-        key = _norm_title(f.get("title", ""))
-        if key and key in seen:
-            continue
-        seen.add(key)
-        out.append(f)
-    return out
-
-
-# Deterministic scoring: each area starts at 100 and loses points per verified
-# issue (minor=2, major=6). Inline-correction areas are scaled by density
-# (issues per 100 words) so long documents are not punished for length.
-_SEV_PENALTY = {"minor": 2, "major": 6}
-_SCORE_WEIGHTS = {
-    "grammar": 0.20, "spelling": 0.10, "punctuation": 0.10, "consistency": 0.15,
-    "structure": 0.10, "procedure": 0.15, "logic": 0.10, "iso": 0.10,
-}
-
-
-def compute_scores(changes: list[dict], findings: list[dict], words: int) -> dict:
+def compute_scores(
+    changes: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+    words: int,
+) -> dict[str, int]:
     words = max(1, words)
 
-    def change_area_score(cats: tuple) -> int:
-        pen = sum(
-            _SEV_PENALTY[c["severity"]]
-            for c in changes
-            if c["category"] in cats and c.get("verified", True)
+    def correction_score(categories: tuple[str, ...]) -> int:
+        penalty = sum(
+            _SEV_PENALTY[change["severity"]]
+            for change in changes
+            if change["category"] in categories and change.get("verified") is True
         )
-        density_pen = pen * 100 / words * 8  # scale by document length
-        return max(0, round(100 - min(pen * 1.5, density_pen) if words > 200 else 100 - pen * 1.5))
+        scaled = penalty * 1.5
+        if words > 200:
+            scaled = min(scaled, penalty * 800 / words)
+        return max(0, round(100 - scaled))
 
-    def finding_area_score(agent_keys: tuple) -> int:
-        pen = sum(
-            _SEV_PENALTY[f["severity"]]
-            for f in findings
-            if f["agent"] in agent_keys and f.get("verified", True)
+    def finding_score(agents: tuple[str, ...]) -> int:
+        penalty = sum(
+            _SEV_PENALTY[finding["severity"]]
+            for finding in findings
+            if finding["agent"] in agents and finding.get("verified") is True
         )
-        return max(0, round(100 - pen * 1.5))
+        return max(0, round(100 - penalty * 1.5))
 
     scores = {
-        "grammar": change_area_score(("grammar", "clarity")),
-        "spelling": change_area_score(("spelling",)),
-        "punctuation": change_area_score(("punctuation",)),
+        "grammar": correction_score(("grammar", "clarity")),
+        "spelling": correction_score(("spelling",)),
+        "punctuation": correction_score(("punctuation",)),
         "consistency": min(
-            change_area_score(("consistency",)), finding_area_score(("terminology",))
+            correction_score(("consistency",)), finding_score(("terminology",))
         ),
-        "structure": finding_area_score(("structure",)),
-        "procedure": finding_area_score(("procedure",)),
-        "logic": finding_area_score(("logic",)),
-        "iso": finding_area_score(("iso",)),
+        "structure": finding_score(("structure",)),
+        "procedure": finding_score(("procedure",)),
+        "logic": finding_score(("logic",)),
+        "iso": finding_score(("iso",)),
     }
-    overall = sum(scores[k] * w for k, w in _SCORE_WEIGHTS.items())
-    scores["overall"] = round(overall)
+    scores["overall"] = round(
+        sum(scores[key] * weight for key, weight in _SCORE_WEIGHTS.items())
+    )
     return scores
 
 
-async def run_pipeline(text: str, progress=None, agent_status=None) -> dict:
-    """Multi-agent document review.
+def _context_for_span(text: str, start: int | None, end: int | None) -> str:
+    if start is None or end is None:
+        return ""
+    left = max(0, start - 220)
+    right = min(len(text), end + 220)
+    return text[left:right].replace("\x00", "")
 
-    Units of work for `progress(done, total)`: one per chunk (corrections),
-    one per document-level agent, one for verification, one for the summary.
-    `agent_status(key, label, state)` is awaited on agent transitions
-    (state: "running" | "done" | "failed").
-    """
+
+def _context_for_finding(text: str, finding: dict[str, Any]) -> str:
+    location = str(finding.get("location") or "").strip()
+    if location:
+        index = text.find(location)
+        if index >= 0:
+            return _context_for_span(text, index, index + len(location))
+    if len(text) <= 900:
+        return text
+    return f"{text[:450]}\n…\n{text[-450:]}"
+
+
+def apply_changes(text: str, changes: list[dict[str, Any]]) -> str:
+    """Apply only anchored, verifier-approved, non-overlapping changes."""
+
+    approved = sorted(
+        (
+            change
+            for change in changes
+            if change.get("verified") is True and change.get("start") is not None
+        ),
+        key=lambda change: int(change["start"]),
+    )
+    output: list[str] = []
+    cursor = 0
+    for change in approved:
+        start = int(change["start"])
+        end = int(change["end"])
+        if start < cursor or text[start:end] != change["original"]:
+            continue
+        output.extend((text[cursor:start], change["corrected"]))
+        cursor = end
+    output.append(text[cursor:])
+    return "".join(output)
+
+
+async def run_pipeline(
+    text: str,
+    progress: ProgressCallback | None = None,
+    agent_status: StatusCallback | None = None,
+) -> dict[str, Any]:
     spans = split_spans(text)
-    n_chunks = len(spans)
-    total = n_chunks + len(DOC_AGENTS) + 2  # + verifier + summary
-    results: list[dict | None] = [None] * n_chunks
-    agent_results: dict[str, dict] = {}
-    done = 0
-    sem = asyncio.Semaphore(CONCURRENCY)
+    total = len(spans) + len(DOC_AGENTS) + 2
+    completed = 0
+    semaphore = asyncio.Semaphore(PIPELINE_CONCURRENCY)
+    chunk_results: list[dict[str, Any] | None] = [None] * len(spans)
+    agent_results: dict[str, dict[str, Any]] = {}
 
-    async def status(key: str, label: str, state: str):
+    async def emit_status(key: str, label: str, state: str) -> None:
         if agent_status:
             await agent_status(key, label, state)
 
-    async def tick():
-        nonlocal done
-        done += 1
+    async def tick() -> None:
+        nonlocal completed
+        completed += 1
         if progress:
-            await progress(done, total)
+            await progress(completed, total)
 
     if progress:
         await progress(0, total)
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        # ---- Stage A: corrections per chunk + doc-level agents, all parallel
-        await status("corrections", "Corrections (grammar, spelling, punctuation)", "running")
-        chunks_left = n_chunks
+    limits = httpx.Limits(
+        max_connections=PIPELINE_CONCURRENCY,
+        max_keepalive_connections=PIPELINE_CONCURRENCY,
+    )
+    timeout = httpx.Timeout(MODEL_TIMEOUT_SECONDS)
+    async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+        await emit_status("corrections", "Corrections", "running")
 
-        async def work(i: int):
-            nonlocal chunks_left
-            s, e = spans[i]
-            async with sem:
-                res = await proofread_chunk(client, text[s:e])
-            results[i] = res
-            chunks_left -= 1
-            if chunks_left == 0:
-                await status("corrections", "Corrections", "done")
+        async def chunk_work(index: int) -> None:
+            start, end = spans[index]
+            before = text[max(0, start - CHUNK_CONTEXT) : start]
+            after = text[end : min(len(text), end + CHUNK_CONTEXT)]
+            try:
+                async with semaphore:
+                    result = await proofread_chunk(
+                        client,
+                        text[start:end],
+                        context_before=before,
+                        context_after=after,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Correction chunk %s failed", index)
+                result = {"changes": [], "failed": True}
+            chunk_results[index] = result
             await tick()
 
-        async def doc_work(agent: dict):
-            await status(agent["key"], agent["label"], "running")
-            async with sem:
-                res = await run_doc_agent(client, agent, text[:30000])
-            agent_results[agent["key"]] = res
-            await status(
-                agent["key"], agent["label"],
-                "failed" if res.get("failed") else "done",
+        async def doc_work(agent: dict[str, str]) -> None:
+            await emit_status(agent["key"], agent["label"], "running")
+            try:
+                async with semaphore:
+                    result = await run_doc_agent(client, agent, text)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Document agent %s failed", agent["key"])
+                result = {"findings": [], "verdict": "", "failed": True}
+            agent_results[agent["key"]] = result
+            await emit_status(
+                agent["key"],
+                agent["label"],
+                "failed" if result.get("failed") else "done",
             )
             await tick()
 
         await asyncio.gather(
-            *(work(i) for i in range(n_chunks)),
-            *(doc_work(a) for a in DOC_AGENTS),
+            *(chunk_work(index) for index in range(len(spans))),
+            *(doc_work(agent) for agent in DOC_AGENTS),
+        )
+        correction_failed = any(
+            result is None or result.get("failed") for result in chunk_results
+        )
+        await emit_status(
+            "corrections", "Corrections", "failed" if correction_failed else "done"
         )
 
-        # ---- Stage B: merge + anchor + dedupe
-        all_changes: list[dict] = []
-        corrected_parts: list[str] = []
-        for i, (s, e) in enumerate(spans):
-            chunk_text = text[s:e]
-            res = results[i] or {}
-            corrected_parts.append(str(res.get("corrected_text") or chunk_text))
-            all_changes.extend(anchor_changes(chunk_text, res.get("changes") or [], s))
-        changes = drop_overlaps(all_changes)
+        changes: list[dict[str, Any]] = []
+        for index, (start, end) in enumerate(spans):
+            result = chunk_results[index] or {}
+            changes.extend(
+                anchor_changes(text[start:end], result.get("changes") or [], start)
+            )
+        changes = dedupe_changes(changes)
 
-        findings: list[dict] = []
+        findings: list[dict[str, Any]] = []
         for agent in DOC_AGENTS:
-            res = agent_results.get(agent["key"]) or {}
-            for f in res.get("findings") or []:
-                if not isinstance(f, dict):
+            result = agent_results.get(agent["key"]) or {}
+            rows = result.get("findings")
+            if not isinstance(rows, list):
+                continue
+            for raw in rows:
+                if not isinstance(raw, dict):
                     continue
                 findings.append(
                     {
                         "agent": agent["key"],
                         "agent_label": agent["label"],
                         "category": agent["category"],
-                        "title": str(f.get("title") or "Finding").strip(),
-                        "detail": str(f.get("detail") or "").strip(),
-                        "location": str(f.get("location") or "").strip(),
-                        "severity": _normalise_severity(f.get("severity")),
-                        "verified": True,
+                        "title": str(raw.get("title") or "Finding").strip(),
+                        "detail": str(raw.get("detail") or "").strip(),
+                        "location": str(raw.get("location") or "").strip(),
+                        "severity": _normalise_severity(raw.get("severity")),
+                        "verified": None,
                         "confidence": None,
                     }
                 )
         findings = dedupe_findings(findings)
 
-        # ---- Stage C: false-positive verification over everything
-        await status("verifier", "False-positive verification", "running")
-        items = []
-        for idx, ch in enumerate(changes[:150]):
-            items.append(
+        await emit_status("verifier", "False-positive verification", "running")
+        verifier_items: list[dict[str, str]] = []
+        for index, change in enumerate(changes):
+            verifier_items.append(
                 {
-                    "id": f"c{idx}",
-                    "kind": ch["category"],
-                    "text": f'change "{ch["original"]}" to "{ch["corrected"]}" — {ch["reason"]}',
+                    "id": f"c{index}",
+                    "kind": change["category"],
+                    "text": (
+                        f'Change "{change["original"]}" to "{change["corrected"]}". '
+                        f"{change['reason']}"
+                    ),
+                    "context": _context_for_span(
+                        text, change.get("start"), change.get("end")
+                    ),
                 }
             )
-        for idx, f in enumerate(findings[:60]):
-            items.append(
-                {"id": f"f{idx}", "kind": f["agent"], "text": f'{f["title"]}: {f["detail"][:180]}'}
+        for index, finding in enumerate(findings):
+            verifier_items.append(
+                {
+                    "id": f"f{index}",
+                    "kind": finding["agent"],
+                    "text": f"{finding['title']}: {finding['detail']}",
+                    "context": _context_for_finding(text, finding),
+                }
             )
         try:
-            verdicts = await run_verifier(client, text, items)
-        except RuntimeError:
+            verdicts = await run_verifier(client, verifier_items)
+        except asyncio.CancelledError:
             raise
         except Exception:
+            logger.exception("Verification stage failed")
             verdicts = {}
-        for idx, ch in enumerate(changes):
-            v = verdicts.get(f"c{idx}")
-            if v:
-                ch["verified"] = v["keep"]
-                ch["confidence"] = v["confidence"]
-                if not v["keep"] and v["note"]:
-                    ch["verifier_note"] = v["note"]
-            else:
-                ch.setdefault("verified", True)
-                ch.setdefault("confidence", None)
-        for idx, f in enumerate(findings):
-            v = verdicts.get(f"f{idx}")
-            if v:
-                f["verified"] = v["keep"]
-                f["confidence"] = v["confidence"]
-                if not v["keep"] and v["note"]:
-                    f["verifier_note"] = v["note"]
-        await status("verifier", "False-positive verification", "done")
+        for prefix, rows in (("c", changes), ("f", findings)):
+            for index, row in enumerate(rows):
+                verdict = verdicts.get(f"{prefix}{index}")
+                if verdict is None:
+                    continue
+                row["verified"] = verdict.get("keep")
+                row["confidence"] = verdict.get("confidence")
+                if verdict.get("note"):
+                    row["verifier_note"] = verdict["note"]
+        changes = resolve_overlaps(changes)
+        await emit_status(
+            "verifier",
+            "False-positive verification",
+            "done" if len(verdicts) == len(verifier_items) else "failed",
+        )
         await tick()
 
-        # ---- Stage D: scores + executive summary
-        stats = build_stats(text, changes, n_chunks)
+        stats = build_stats(text, changes, len(spans))
         scores = compute_scores(changes, findings, stats["words"])
-        await status("summary", "Executive summary", "running")
-        top = sorted(
-            [f for f in findings if f["verified"]],
-            key=lambda f: (f["severity"] != "major",),
+        await emit_status("summary", "Executive summary", "running")
+        verified_findings = sorted(
+            (finding for finding in findings if finding.get("verified") is True),
+            key=lambda finding: finding["severity"] != "major",
         )
         try:
-            exec_summary = await run_summary(client, stats, scores, top)
-        except RuntimeError:
+            executive_summary = await run_summary(
+                client, stats, scores, verified_findings
+            )
+        except asyncio.CancelledError:
             raise
         except Exception:
-            exec_summary = {"summary": "", "risk_level": "medium", "top_issues": [], "readability": None}
-        await status("summary", "Executive summary", "done")
+            logger.exception("Executive-summary stage failed")
+            executive_summary = {
+                "summary": "",
+                "risk_level": "medium",
+                "top_issues": [],
+                "readability": None,
+                "failed": True,
+            }
+        await emit_status(
+            "summary",
+            "Executive summary",
+            "failed" if executive_summary.get("failed") else "done",
+        )
         await tick()
 
-    iso_res = agent_results.get("iso") or {}
+    iso_result = agent_results.get("iso") or {}
     report = {
         "agents": [
             {
-                "key": a["key"],
-                "label": a["label"],
-                "status": "failed" if (agent_results.get(a["key"]) or {}).get("failed") else "done",
-                "verdict": str((agent_results.get(a["key"]) or {}).get("verdict") or ""),
-                "findings": sum(1 for f in findings if f["agent"] == a["key"]),
+                "key": agent["key"],
+                "label": agent["label"],
+                "status": (
+                    "failed"
+                    if (agent_results.get(agent["key"]) or {}).get("failed")
+                    else "done"
+                ),
+                "verdict": str(
+                    (agent_results.get(agent["key"]) or {}).get("verdict") or ""
+                ),
+                "findings": sum(
+                    finding["agent"] == agent["key"] for finding in findings
+                ),
             }
-            for a in DOC_AGENTS
+            for agent in DOC_AGENTS
         ],
         "findings": findings,
         "scores": scores,
-        "summary": exec_summary,
+        "summary": executive_summary,
         "iso": {
-            "present_sections": [str(s) for s in iso_res.get("present_sections") or []],
-            "missing_sections": [str(s) for s in iso_res.get("missing_sections") or []],
-            "is_sop": bool(iso_res.get("is_sop")),
+            "present_sections": [
+                str(section) for section in iso_result.get("present_sections") or []
+            ],
+            "missing_sections": [
+                str(section) for section in iso_result.get("missing_sections") or []
+            ],
+            "is_sop": bool(iso_result.get("is_sop")),
         },
     }
     stats["report"] = report
-
-    verified_findings = sum(1 for f in findings if f["verified"])
-    if stats["issues"] == 0 and verified_findings == 0:
-        summary = f"No issues found across {stats['words']:,} words."
+    verified_count = stats["verified_issues"]
+    verified_findings_count = sum(
+        finding.get("verified") is True for finding in findings
+    )
+    if not verified_count and not verified_findings_count:
+        summary = f"No verified issues found across {stats['words']:,} words."
     else:
         summary = (
-            f"{stats['issues']:,} suggested correction"
-            f"{'s' if stats['issues'] != 1 else ''} and "
-            f"{verified_findings} document-level finding"
-            f"{'s' if verified_findings != 1 else ''} "
-            f"across {stats['words']:,} words. Overall score: {scores['overall']}/100."
+            f"{verified_count:,} verified correction"
+            f"{'s' if verified_count != 1 else ''} and "
+            f"{verified_findings_count} verified document-level finding"
+            f"{'s' if verified_findings_count != 1 else ''} across "
+            f"{stats['words']:,} words. Overall score: {scores['overall']}/100."
         )
-
     return {
-        "corrected_text": "".join(corrected_parts),
+        "corrected_text": apply_changes(text, changes),
         "changes": changes,
         "summary": summary,
         "stats": stats,

@@ -3,47 +3,84 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
+import zipfile
+from contextlib import suppress
+from pathlib import Path
+from typing import Annotated, Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.cerebras_client import CEREBRAS_API_KEY, MODEL
-from app.pipeline import MAX_CHARS, run_pipeline
+from app.config import (
+    MAX_CHARS,
+    MAX_DOCX_ENTRIES,
+    MAX_DOCX_UNCOMPRESSED_BYTES,
+    MAX_UPLOAD_BYTES,
+    PIPELINE_TIMEOUT_SECONDS,
+    SSE_HEARTBEAT_SECONDS,
+)
+from app.pipeline import run_pipeline
 from app.supabase_client import get_job, list_jobs, save_job, storage_mode
 
-app = FastAPI(title="Proofreading Agent")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger(__name__)
+ROOT = Path(__file__).resolve().parent.parent
 
+app = FastAPI(title="Proofreading Agent", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "HEAD", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
-
-MAX_UPLOAD_BYTES = 2_000_000
 
 
 class ProofreadRequest(BaseModel):
     text: str
 
 
-def _validate_text(text: str):
+class ExportRequest(BaseModel):
+    text: str
+    title: str = "Proofread document"
+
+
+def _validate_text(text: str) -> None:
     if not text or not text.strip():
         raise HTTPException(status_code=400, detail="Text must not be empty.")
     if len(text) > MAX_CHARS:
         raise HTTPException(
-            status_code=400,
+            status_code=413,
             detail=f"Text exceeds the {MAX_CHARS:,} character limit.",
         )
 
 
+async def _run_with_timeout(
+    text: str,
+    progress: Any = None,
+    agent_status: Any = None,
+) -> dict[str, Any]:
+    try:
+        async with asyncio.timeout(PIPELINE_TIMEOUT_SECONDS):
+            return await run_pipeline(text, progress, agent_status)
+    except TimeoutError as exc:
+        raise RuntimeError(
+            "The review timed out. Please retry or split this document into sections."
+        ) from exc
+
+
 @app.get("/health")
-def health():
+def health() -> dict[str, Any]:
     return {
         "status": "ok",
+        "version": app.version,
         "model": MODEL,
         "storage": storage_mode(),
         "cerebras_key_configured": bool(CEREBRAS_API_KEY),
@@ -52,83 +89,130 @@ def health():
 
 
 @app.post("/proofread")
-async def proofread_endpoint(req: ProofreadRequest):
+async def proofread_endpoint(req: ProofreadRequest) -> dict[str, Any]:
     _validate_text(req.text)
     try:
-        result = await run_pipeline(req.text)
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    saved = save_job(req.text, result)
+        result = await _run_with_timeout(req.text)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    saved = await asyncio.to_thread(save_job, req.text, result)
     return {"id": saved.get("id"), **result}
 
 
 @app.post("/proofread/stream")
-async def proofread_stream(req: ProofreadRequest):
-    """Same pipeline, but streams progress events as Server-Sent Events:
-    {"type":"progress","done":n,"total":n} ... {"type":"result","payload":{...}}
-    """
+async def proofread_stream(
+    req: ProofreadRequest, request: Request
+) -> StreamingResponse:
     _validate_text(req.text)
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=64)
 
-    async def progress(done: int, total: int):
+    async def progress(done: int, total: int) -> None:
         await queue.put({"type": "progress", "done": done, "total": total})
 
-    async def agent_status(key: str, label: str, state: str):
-        await queue.put({"type": "agent", "key": key, "label": label, "state": state})
+    async def agent_status(key: str, label: str, state: str) -> None:
+        await queue.put(
+            {
+                "type": "agent",
+                "key": key,
+                "label": label,
+                "state": state,
+            }
+        )
 
-    async def run():
+    async def runner() -> None:
         try:
-            result = await run_pipeline(req.text, progress, agent_status)
-            saved = save_job(req.text, result)
+            result = await _run_with_timeout(req.text, progress, agent_status)
+            saved = await asyncio.to_thread(save_job, req.text, result)
             await queue.put(
                 {"type": "result", "payload": {"id": saved.get("id"), **result}}
             )
-        except Exception as e:
-            await queue.put({"type": "error", "detail": str(e)})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Streaming review failed")
+            await queue.put(
+                {
+                    "type": "error",
+                    "detail": (
+                        "The review could not be completed. Please retry in a moment."
+                    ),
+                }
+            )
         finally:
             await queue.put(None)
 
-    async def gen():
-        task = asyncio.create_task(run())
+    async def events() -> Any:
+        task = asyncio.create_task(runner(), name="proofread-pipeline")
+        event_id = 0
         try:
+            yield "retry: 3000\n\n"
             while True:
-                item = await queue.get()
+                if await request.is_disconnected():
+                    break
+                try:
+                    item = await asyncio.wait_for(
+                        queue.get(), timeout=SSE_HEARTBEAT_SECONDS
+                    )
+                except TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
                 if item is None:
                     break
-                yield f"data: {json.dumps(item)}\n\n"
+                event_id += 1
+                payload = json.dumps(item, ensure_ascii=False)
+                yield f"id: {event_id}\ndata: {payload}\n\n"
+        except asyncio.CancelledError:
+            raise
         finally:
-            await task
+            if not task.done():
+                task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
     return StreamingResponse(
-        gen(),
+        events(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
-def _extract_docx(data: bytes) -> str:
-    """Extract paragraphs AND tables from a .docx, in document order.
+def _validate_docx_archive(data: bytes) -> None:
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            entries = archive.infolist()
+            if len(entries) > MAX_DOCX_ENTRIES:
+                raise ValueError("too many archive entries")
+            total = sum(entry.file_size for entry in entries)
+            if total > MAX_DOCX_UNCOMPRESSED_BYTES:
+                raise ValueError("expanded document is too large")
+            if not any(entry.filename == "word/document.xml" for entry in entries):
+                raise ValueError("missing Word document content")
+    except (zipfile.BadZipFile, OSError, ValueError) as exc:
+        raise ValueError("invalid DOCX archive") from exc
 
-    Tables matter for SOP-style documents: the structural review cross-checks
-    prose steps against procedure tables, so they must reach the model.
-    Table rows are rendered as pipe-separated lines.
-    """
+
+def _extract_docx(data: bytes) -> str:
     from docx import Document
     from docx.oxml.ns import qn
     from docx.table import Table
     from docx.text.paragraph import Paragraph
 
-    doc = Document(io.BytesIO(data))
+    _validate_docx_archive(data)
+    document = Document(io.BytesIO(data))
     parts: list[str] = []
-    for child in doc.element.body.iterchildren():
+    for child in document.element.body.iterchildren():
         if child.tag == qn("w:p"):
-            t = Paragraph(child, doc).text
-            if t.strip():
-                parts.append(t)
+            paragraph = Paragraph(child, document).text
+            if paragraph.strip():
+                parts.append(paragraph)
         elif child.tag == qn("w:tbl"):
-            rows = []
-            for row in Table(child, doc).rows:
-                cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+            rows: list[str] = []
+            for row in Table(child, document).rows:
+                cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
                 if any(cells):
                     rows.append("| " + " | ".join(cells) + " |")
             if rows:
@@ -136,75 +220,85 @@ def _extract_docx(data: bytes) -> str:
     return "\n\n".join(parts)
 
 
+async def _read_limited(file: UploadFile) -> bytes:
+    data = bytearray()
+    while chunk := await file.read(64 * 1024):
+        data.extend(chunk)
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="File too large (max 2 MB).")
+    return bytes(data)
+
+
 @app.post("/extract")
-async def extract_endpoint(file: UploadFile = File(...)):
-    """Extract plain text from an uploaded .txt, .md, or .docx file."""
+async def extract_endpoint(
+    file: Annotated[UploadFile, File()],
+) -> dict[str, Any]:
     name = (file.filename or "").lower()
-    data = await file.read()
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="File too large (max 2 MB).")
+    data = await _read_limited(file)
     if name.endswith(".docx"):
         try:
-            text = _extract_docx(data)
-        except Exception:
+            text = await asyncio.to_thread(_extract_docx, data)
+        except Exception as exc:
+            logger.info("Rejected malformed DOCX %r: %s", file.filename, exc)
             raise HTTPException(
                 status_code=400, detail="Could not read this .docx file."
-            )
+            ) from exc
     elif name.endswith((".txt", ".md")):
-        text = data.decode("utf-8", errors="replace")
+        text = data.decode("utf-8-sig", errors="replace")
     else:
         raise HTTPException(
             status_code=400,
             detail="Unsupported file type. Upload a .txt, .md, or .docx file.",
         )
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="The file contains no text.")
+    _validate_text(text)
     return {"filename": file.filename, "text": text, "chars": len(text)}
 
 
-class ExportRequest(BaseModel):
-    text: str
-    title: str = "Proofread document"
-
-
 @app.post("/export/docx")
-def export_docx(req: ExportRequest):
-    """Render corrected text as a downloadable Word document."""
-    if not req.text.strip():
-        raise HTTPException(status_code=400, detail="Text must not be empty.")
+async def export_docx(req: ExportRequest) -> StreamingResponse:
+    _validate_text(req.text)
     from docx import Document
 
-    doc = Document()
-    doc.add_heading(req.title[:120], level=1)
-    for para in req.text.split("\n\n"):
-        doc.add_paragraph(para)
-    buf = io.BytesIO()
-    doc.save(buf)
-    buf.seek(0)
-    safe_name = "".join(c for c in req.title if c.isalnum() or c in " -_")[:60] or "document"
+    def build() -> io.BytesIO:
+        document = Document()
+        document.add_heading(req.title[:120], level=1)
+        for paragraph in req.text.split("\n\n"):
+            document.add_paragraph(paragraph)
+        buffer = io.BytesIO()
+        document.save(buffer)
+        buffer.seek(0)
+        return buffer
+
+    buffer = await asyncio.to_thread(build)
+    safe_name = (
+        "".join(char for char in req.title if char.isalnum() or char in " -_")[:60]
+        or "document"
+    )
     return StreamingResponse(
-        buf,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        buffer,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
         headers={"Content-Disposition": f'attachment; filename="{safe_name}.docx"'},
     )
 
 
 @app.get("/jobs/{job_id}")
-def get_job_endpoint(job_id: str):
-    job = get_job(job_id)
+async def get_job_endpoint(job_id: str) -> dict[str, Any]:
+    job = await asyncio.to_thread(get_job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     return job
 
 
 @app.get("/jobs")
-def list_jobs_endpoint(limit: int = 20):
-    return list_jobs(min(max(limit, 1), 100))
+async def list_jobs_endpoint(limit: int = 20) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(list_jobs, min(max(limit, 1), 100))
 
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
 @app.api_route("/", methods=["GET", "HEAD"])
-def root():
-    return FileResponse("static/index.html")
+def root() -> FileResponse:
+    return FileResponse(ROOT / "static" / "index.html")

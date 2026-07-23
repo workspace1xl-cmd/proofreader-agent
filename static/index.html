@@ -135,6 +135,7 @@
     transition:width .4s ease;
   }
   .progress-fill.indeterminate{ animation:sweep 1.4s ease-in-out infinite; width:30%; }
+  .cancel-review{ margin-top:16px; }
   @keyframes sweep{ 0%{margin-left:-30%;} 100%{margin-left:100%;} }
   .agent-list{ margin-top:18px; display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
     gap:4px; text-align:left; }
@@ -437,6 +438,7 @@
         <div class="progress-status" id="progressStatus">Reading closely&hellip;</div>
         <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
         <div class="agent-list" id="agentList"></div>
+        <button id="cancelBtn" class="cancel-review" type="button">Cancel review</button>
       </div>
     </div>
     <div class="field-error" id="inputError" style="max-width:760px; margin:10px auto 0;"></div>
@@ -558,7 +560,7 @@ let filterCat = 'all';
 /* ---------------- editor ---------------- */
 const input = $('input'), counts = $('counts'), inputError = $('inputError');
 const submitBtn = $('submitBtn'), clearBtn = $('clearBtn');
-const MAX_CHARS = 100000;
+const MAX_CHARS = input.maxLength;
 let loadedFilename = null;
 
 function refreshCounts(){
@@ -630,6 +632,7 @@ const progressWrap = $('progressWrap'), progressFill = $('progressFill'),
 const SPIN = ['Reading closely…','Checking the grammar…','Minding the commas…',
   'Weighing every word…','Sharpening the red pen…'];
 let spinTimer = null;
+let activeController = null;
 
 function setBusy(b){
   submitBtn.disabled = b;
@@ -654,27 +657,36 @@ async function proofread(){
   if(!text.trim()){ showError('Text must not be empty.'); return; }
   if(text.length > MAX_CHARS){ showError(`Text exceeds the ${MAX_CHARS.toLocaleString('en-GB')} character limit.`); return; }
   setBusy(true);
+  activeController = new AbortController();
   try{
-    const payload = await streamProofread(text) || await plainProofread(text);
+    const payload = await streamProofread(text, activeController.signal);
     enterReview(text, payload);
   }catch(err){
-    showError(err.message || 'Something went wrong. Please try again.');
+    if(err.name !== 'AbortError'){
+      showError(err.message || 'Something went wrong. Please try again.');
+    }
   }finally{
+    activeController = null;
     setBusy(false);
   }
 }
 
-async function streamProofread(text){
+async function streamProofread(text, signal){
   let res;
   try{
     res = await fetch('/proofread/stream', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text}), signal
     });
-  }catch{ return null; }
+  }catch(err){
+    if(err.name === 'AbortError') throw err;
+    throw new Error('Could not connect to the review service. Please retry.');
+  }
   if(!res.ok){
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Request failed.');
   }
+  if(!res.body || !res.body.getReader) return plainProofread(text, signal);
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = '', payload = null;
@@ -684,9 +696,15 @@ async function streamProofread(text){
     buf += dec.decode(value, {stream:true});
     let idx;
     while((idx = buf.indexOf('\n\n')) >= 0){
-      const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 2);
-      if(!line.startsWith('data:')) continue;
-      const ev = JSON.parse(line.slice(5));
+      const block = buf.slice(0, idx).trim(); buf = buf.slice(idx + 2);
+      const dataLines = block.split(/\r?\n/).filter(line => line.startsWith('data:'));
+      if(!dataLines.length) continue;
+      let ev;
+      try{
+        ev = JSON.parse(dataLines.map(line => line.slice(5).trimStart()).join('\n'));
+      }catch{
+        throw new Error('The review service sent an invalid progress event.');
+      }
       if(ev.type === 'progress'){
         progressFill.classList.remove('indeterminate');
         const pct = ev.total ? Math.max(4, Math.round(ev.done / ev.total * 100)) : 4;
@@ -704,6 +722,7 @@ async function streamProofread(text){
       }
     }
   }
+  if(!payload) throw new Error('The review ended before a result was received. Please retry.');
   return payload;
 }
 
@@ -722,14 +741,22 @@ function upsertAgent(ev){
   el.classList.add(ev.state);
 }
 
-async function plainProofread(text){
+async function plainProofread(text, signal){
   const res = await fetch('/proofread', {
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({text}), signal
   });
   const data = await res.json().catch(() => ({}));
   if(!res.ok) throw new Error(data.detail || 'Request failed.');
   return data;
 }
+
+$('cancelBtn').addEventListener('click', () => {
+  if(activeController){
+    activeController.abort();
+    showError('Review cancelled.');
+  }
+});
 
 submitBtn.addEventListener('click', proofread);
 input.addEventListener('keydown', e => {
@@ -738,8 +765,10 @@ input.addEventListener('keydown', e => {
 
 /* ---------------- review ---------------- */
 function enterReview(original, payload, title){
-  // Corrections rejected by the verification agent start unaccepted.
-  const changes = (payload.changes || []).map((c, i) => ({...c, i, accepted: c.verified !== false}));
+  // Only verifier-approved corrections start accepted.
+  const changes = (payload.changes || []).map((c, i) => ({
+    ...c, i, accepted: c.verified === true
+  }));
   state = {
     original,
     title: title || loadedFilename || 'Pasted text',
@@ -880,8 +909,9 @@ function renderFindingsList(report){
   const match = f =>
     (state.fSev === 'all' || f.severity === state.fSev) &&
     (!q || (f.title + ' ' + f.detail + ' ' + f.agent_label).toLowerCase().includes(q));
-  const verified = report.findings.filter(f => f.verified !== false && match(f));
-  const filtered = report.findings.filter(f => f.verified === false);
+  const verified = report.findings.filter(f => f.verified === true && match(f));
+  const unverified = report.findings.filter(f => f.verified == null && match(f));
+  const filtered = report.findings.filter(f => f.verified === false && match(f));
   let html = '';
   if(!report.findings.length){
     html += `<div class="clean-note">No document-level issues found &mdash; terminology, structure, procedures, and logic are consistent.</div>`;
@@ -899,6 +929,10 @@ function renderFindingsList(report){
   if(filtered.length){
     html += `<details class="fp-group"><summary>Filtered as likely false positives (${filtered.length})</summary>
       ${filtered.map(findingRow).join('')}</details>`;
+  }
+  if(unverified.length){
+    html += `<details class="fp-group"><summary>Could not be verified (${unverified.length})</summary>
+      ${unverified.map(findingRow).join('')}</details>`;
   }
   el.innerHTML = html;
 }
@@ -999,6 +1033,7 @@ function renderChanges(){
         ${c.severity==='major' ? '<span class="sev-major" title="Major issue"></span>' : ''}
         ${c.confidence != null ? `<span class="conf" title="Verifier confidence">${Math.round(c.confidence*100)}%</span>` : ''}
         ${c.verified === false ? '<span class="filtered-tag" title="The verification agent flagged this as a likely false positive">auto-filtered</span>' : ''}
+        ${c.verified == null ? '<span class="filtered-tag" title="Verification did not complete for this item">unverified</span>' : ''}
         <span class="spacer" style="flex:1"></span>
         ${c.accepted ? '<span class="accepted-tag">Accepted</span>' : '<span class="rejected-tag">Rejected</span>'}
       </div>
@@ -1161,7 +1196,11 @@ function buildMarkdownReport(){
   return lines.join('\n');
 }
 
-function csvEscape(v){ v = String(v ?? ''); return '"' + v.replace(/"/g, '""') + '"'; }
+function csvEscape(v){
+  v = String(v ?? '');
+  if(/^[=+\-@]/.test(v)) v = "'" + v;
+  return '"' + v.replace(/"/g, '""') + '"';
+}
 function buildCsv(){
   const rows = [['type','agent_or_category','severity','title_or_original','detail_or_corrected','reason','confidence','status']];
   for(const c of state.changes){

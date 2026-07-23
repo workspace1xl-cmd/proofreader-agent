@@ -1,98 +1,107 @@
+"""Resilient structured-output client for Cerebras inference."""
+
 from __future__ import annotations
 
-import os
-import json
-import re
 import asyncio
+import email.utils
+import json
+import logging
+import os
+import random
+import re
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 
+from app.config import MODEL_TIMEOUT_SECONDS
+
+logger = logging.getLogger(__name__)
+
 CEREBRAS_API_KEY = os.environ.get("CEREBRAS_API_KEY", "")
-CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
+CEREBRAS_URL = os.environ.get(
+    "CEREBRAS_URL", "https://api.cerebras.ai/v1/chat/completions"
+)
 MODEL = os.environ.get("CEREBRAS_MODEL", "gpt-oss-120b")
 
-SYSTEM_PROMPT = """You are a precision proofreading engine. You correct grammar, spelling, \
-punctuation, clarity, and consistency issues WITHOUT changing the author's meaning, tone, or voice. \
-You never rewrite for style unless it is a genuine error. You never add opinions or content.
+SYSTEM_PROMPT = """You are a precision proofreading engine. Correct only genuine
+grammar, spelling, punctuation, clarity, and internal-consistency errors without
+changing meaning, tone, formatting, names, defined terms, or optional style.
 
-Return ONLY valid JSON matching this exact schema, nothing else, no markdown fences:
+Return ONLY this JSON object:
 {
-  "corrected_text": "<the full corrected text>",
-  "changes": [
-    {
-      "original": "<exact original snippet, copied verbatim from the input>",
-      "corrected": "<exact replacement snippet>",
-      "category": "<grammar|spelling|punctuation|clarity|consistency>",
-      "reason": "<short plain-language explanation of the fix>",
-      "severity": "<minor|major>"
-    }
-  ],
-  "summary": "<one sentence summary of overall quality>"
+  "corrected_text": "<the full TARGET text with listed corrections applied>",
+  "changes": [{
+    "original": "<smallest exact verbatim snippet from TARGET>",
+    "corrected": "<exact replacement>",
+    "category": "<grammar|spelling|punctuation|clarity|consistency>",
+    "reason": "<brief factual explanation>",
+    "severity": "<minor|major>"
+  }],
+  "summary": "<one sentence>"
 }
 
 Rules:
-- "original" must be copied character-for-character from the input so it can be located programmatically. Keep snippets short — the smallest span that contains the error plus a word of context if needed.
-- If there are no errors, return corrected_text identical to input and an empty changes array.
-- Never fabricate changes. Only list changes you actually made.
-- Preserve original paragraph breaks and formatting exactly.
-- List changes in the order they appear in the text.
-- NEVER suggest renaming roles, job titles, department names, product names, section headings, or defined terms (e.g. do not shorten "Graphic Design Manager" to "Design Manager"). If the text uses two variants of the same name, align the minority variant to the dominant one and categorise it as "consistency".
-- Do NOT impose optional style preferences. The serial (Oxford) comma, colons after headings, capitalisation style in titles, and similar choices are only errors if the text is internally inconsistent about them.
-- Do NOT add punctuation to headings, labels, table cells, or list items to match your own style.
-- Prioritise genuine grammar, agreement, and word-choice errors over marginal punctuation tweaks.
-- Prefer fewer, high-confidence corrections over many debatable ones. If a change is debatable, omit it.
-"""
-
-DOC_REVIEW_PROMPT = """You are a senior documentation reviewer (ISO 9001 / QMS style). You receive a \
-full document that has already been through mechanical proofreading — do NOT list spelling, grammar, \
-or punctuation fixes. Instead, review the document as a whole for:
-
-1. Terminology and role consistency — the same role, department, or defined term should be named \
-identically everywhere. Flag variants and state which form dominates.
-2. Heading and formatting consistency — numbering, colon usage, capitalisation patterns across \
-sections should match.
-3. Procedural logic — steps should be in a workable order; every decision point (e.g. "Approved?") \
-must have all branches (a Yes path needs a No path); no dead ends; referenced sections, tables, or \
-attachments must exist in the document.
-4. Cross-section consistency — if a process is described both as prose steps and in a table, \
-checklist, or flowchart, they must describe the same process, roles, and order.
-
-Return ONLY valid JSON, nothing else, no markdown fences:
-{
-  "findings": [
-    {
-      "title": "<short name of the issue>",
-      "detail": "<what is wrong and where, in plain language, with a concrete recommendation>",
-      "category": "<terminology|structure|logic|consistency>",
-      "severity": "<minor|major>"
-    }
-  ],
-  "verdict": "<one sentence on overall document quality from a structural point of view>"
-}
-
-Only report real findings you can point to in the text. An empty findings array is a valid answer \
-for a clean document. Never invent issues to seem thorough.
+- Review only TARGET. CONTEXT is read-only and must never appear in corrected_text.
+- Every original must occur verbatim in TARGET and every listed replacement must
+  be reflected in corrected_text.
+- Preserve paragraph breaks, markdown syntax, list markers, tables, code, URLs,
+  email addresses, identifiers, product names, headings, and Unicode characters.
+- Do not alter text inside fenced/inline code, URLs, email addresses, or file paths
+  unless it is unmistakably malformed.
+- Do not rename roles, titles, departments, products, headings, or defined terms.
+- Do not impose Oxford commas, heading punctuation, title capitalization, or other
+  optional preferences unless the document is internally inconsistent.
+- Prefer no change over a debatable change. Never fabricate a correction.
+- If clean, return TARGET unchanged with an empty changes array.
 """
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+Sleep = Callable[[float], Awaitable[None]]
 
 
-def _parse_response(raw: str) -> dict | None:
+def _parse_response(raw: str) -> dict[str, Any] | None:
     raw = raw.strip()
     if raw.startswith("```"):
-        raw = raw.strip("`")
-        if raw.lower().startswith("json"):
-            raw = raw[4:].strip()
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        m = _JSON_RE.search(raw)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except json.JSONDecodeError:
-                return None
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\s*```$", "", raw)
+    candidates = [raw]
+    match = _JSON_RE.search(raw)
+    if match and match.group(0) != raw:
+        candidates.append(match.group(0))
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
     return None
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        parsed = email.utils.parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return max(0.0, (parsed - datetime.now(UTC)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _backoff(attempt: int, retry_after: str | None = None) -> float:
+    requested = _retry_after_seconds(retry_after)
+    exponential = min(2.0 * (2**attempt), 24.0)
+    base = max(exponential, requested or 0.0)
+    return min(30.0, base + random.uniform(0.0, min(1.0, base * 0.15)))
 
 
 async def call_json(
@@ -102,12 +111,18 @@ async def call_json(
     max_tokens: int = 4096,
     temperature: float = 0.1,
     attempts: int = 4,
-) -> dict | None:
-    """One structured-JSON model call with retries and 429/503 backoff.
-    Returns None if every attempt fails — callers degrade gracefully."""
+    *,
+    sleep: Sleep = asyncio.sleep,
+) -> dict[str, Any] | None:
+    """Call the model and return a JSON object.
+
+    Retry transient HTTP failures, timeouts, invalid response envelopes, and
+    malformed model JSON. Cancellation always propagates immediately.
+    """
+
     if not CEREBRAS_API_KEY:
         raise RuntimeError(
-            "CEREBRAS_API_KEY is not set. Create a key at cloud.cerebras.ai and export it."
+            "CEREBRAS_API_KEY is not set. Create a key at cloud.cerebras.ai."
         )
     payload = {
         "model": MODEL,
@@ -122,60 +137,108 @@ async def call_json(
         "Authorization": f"Bearer {CEREBRAS_API_KEY}",
         "Content-Type": "application/json",
     }
-    for attempt in range(attempts):
+
+    for attempt in range(max(1, attempts)):
+        retry_after: str | None = None
         try:
-            resp = await client.post(CEREBRAS_URL, headers=headers, json=payload)
-            if resp.status_code in (429, 503):
-                # Rate-limited or at capacity: honour Retry-After, capped.
-                try:
-                    delay = float(resp.headers.get("retry-after") or 0)
-                except ValueError:
-                    delay = 0
-                await asyncio.sleep(min(max(delay, 2.5 * (attempt + 1)), 25))
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            parsed = _parse_response(data["choices"][0]["message"]["content"])
+            response = await client.post(
+                CEREBRAS_URL,
+                headers=headers,
+                json=payload,
+                timeout=MODEL_TIMEOUT_SECONDS,
+            )
+            retry_after = response.headers.get("retry-after")
+            if response.status_code in _RETRYABLE_STATUS:
+                raise httpx.HTTPStatusError(
+                    "retryable model response",
+                    request=response.request,
+                    response=response,
+                )
+            response.raise_for_status()
+            envelope = response.json()
+            if not isinstance(envelope, dict):
+                raise ValueError("model response envelope is not an object")
+            choices = envelope.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise ValueError("model response has no choices")
+            message = (
+                choices[0].get("message") if isinstance(choices[0], dict) else None
+            )
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, str):
+                raise ValueError("model response has no text content")
+            parsed = _parse_response(content)
             if parsed is not None:
                 return parsed
-        except (httpx.HTTPError, KeyError, IndexError):
-            pass
-        if attempt < attempts - 1:
-            await asyncio.sleep(2.0 * (attempt + 1))
+            raise ValueError("model returned malformed JSON")
+        except asyncio.CancelledError:
+            raise
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in _RETRYABLE_STATUS:
+                logger.warning(
+                    "Non-retryable model HTTP status %s", exc.response.status_code
+                )
+                return None
+            logger.warning(
+                "Transient model HTTP status %s (attempt %s/%s)",
+                exc.response.status_code,
+                attempt + 1,
+                attempts,
+            )
+        except (
+            httpx.TimeoutException,
+            httpx.TransportError,
+            ValueError,
+            KeyError,
+        ) as exc:
+            logger.warning(
+                "Model call failed (attempt %s/%s): %s",
+                attempt + 1,
+                attempts,
+                type(exc).__name__,
+            )
+        if attempt + 1 < max(1, attempts):
+            await sleep(_backoff(attempt, retry_after))
     return None
 
 
-async def proofread_chunk(client: httpx.AsyncClient, text: str, attempts: int = 4) -> dict:
-    """Proofread one chunk of text. Falls back to a no-op result (input
-    returned unchanged) if every attempt fails, so one bad chunk never sinks
-    a whole document."""
-    parsed = await call_json(
-        client, SYSTEM_PROMPT, text, max_tokens=8192, attempts=attempts
+async def proofread_chunk(
+    client: httpx.AsyncClient,
+    text: str,
+    *,
+    context_before: str = "",
+    context_after: str = "",
+    attempts: int = 4,
+) -> dict[str, Any]:
+    """Proofread a target chunk with read-only boundary context."""
+
+    user = (
+        f"CONTEXT BEFORE (read-only):\n{context_before}\n\n"
+        f"TARGET:\n{text}\n\n"
+        f"CONTEXT AFTER (read-only):\n{context_after}"
     )
-    if parsed is not None and "corrected_text" in parsed:
-        parsed.setdefault("changes", [])
-        parsed.setdefault("summary", "")
-        return parsed
+    parsed = await call_json(
+        client,
+        SYSTEM_PROMPT,
+        user,
+        max_tokens=8192,
+        attempts=attempts,
+    )
+    if parsed is None:
+        return {
+            "corrected_text": text,
+            "changes": [],
+            "summary": "This section could not be analysed.",
+            "failed": True,
+        }
+    changes = parsed.get("changes")
     return {
-        "corrected_text": text,
-        "changes": [],
-        "summary": "This section could not be analysed (model unavailable).",
+        "corrected_text": (
+            parsed.get("corrected_text")
+            if isinstance(parsed.get("corrected_text"), str)
+            else text
+        ),
+        "changes": changes if isinstance(changes, list) else [],
+        "summary": str(parsed.get("summary") or ""),
+        "failed": False,
     }
-
-
-DOC_REVIEW_MAX_CHARS = 30_000
-
-
-async def review_document(client: httpx.AsyncClient, text: str, attempts: int = 3) -> dict:
-    """Legacy single-call structural review, kept for API compatibility.
-    Degrades to an empty review on failure — never sinks the job."""
-    truncated = len(text) > DOC_REVIEW_MAX_CHARS
-    doc = text[:DOC_REVIEW_MAX_CHARS]
-    parsed = await call_json(
-        client, DOC_REVIEW_PROMPT, doc, max_tokens=4096, temperature=0.2, attempts=attempts
-    )
-    if parsed is not None and isinstance(parsed.get("findings"), list):
-        parsed.setdefault("verdict", "")
-        parsed["truncated"] = truncated
-        return parsed
-    return {"findings": [], "verdict": "", "truncated": truncated, "failed": True}
