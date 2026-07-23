@@ -10,7 +10,13 @@ from typing import Any
 
 import httpx
 
-from app.agents import DOC_AGENTS, run_doc_agent, run_summary, run_verifier
+from app.agents import (
+    CORRECTION_REVIEWERS,
+    DOC_AGENTS,
+    run_doc_agent,
+    run_summary,
+    run_verifier,
+)
 from app.cerebras_client import proofread_chunk
 from app.config import (
     CHUNK_CONTEXT,
@@ -18,20 +24,36 @@ from app.config import (
     MODEL_TIMEOUT_SECONDS,
     PIPELINE_CONCURRENCY,
 )
+from app.document_intelligence import (
+    detect_document_type,
+    is_protected_change,
+    is_reviewer_applicable,
+    run_rule_reviewer,
+)
 
 logger = logging.getLogger(__name__)
 
-CATEGORIES = ("grammar", "spelling", "punctuation", "clarity", "consistency")
+CATEGORIES = (
+    "grammar",
+    "spelling",
+    "punctuation",
+    "clarity",
+    "readability",
+    "style",
+    "consistency",
+)
 _WORD_RE = re.compile(r"[\w'\u2019-]+", re.UNICODE)
 _SENTENCE_RE = re.compile(r"[.!?]+(?:\s|$)")
 _SEV_PENALTY = {"minor": 2, "major": 6}
 _SCORE_WEIGHTS = {
-    "grammar": 0.20,
-    "spelling": 0.10,
-    "punctuation": 0.10,
-    "consistency": 0.15,
+    "grammar": 0.15,
+    "spelling": 0.08,
+    "punctuation": 0.08,
+    "readability": 0.08,
+    "style": 0.06,
+    "consistency": 0.12,
     "structure": 0.10,
-    "procedure": 0.15,
+    "procedure": 0.13,
     "logic": 0.10,
     "iso": 0.10,
 }
@@ -126,6 +148,12 @@ def anchor_changes(
             "corrected": corrected,
             "category": _normalise_category(raw.get("category")),
             "reason": str(raw.get("reason") or "").strip(),
+            "evidence": str(raw.get("evidence") or original).strip(),
+            "rule": str(raw.get("rule") or "Language correctness").strip(),
+            "suggested_fix": str(
+                raw.get("suggested_fix") or f"Replace with {corrected!r}."
+            ).strip(),
+            "supporting_context": str(raw.get("supporting_context") or "").strip(),
             "severity": _normalise_severity(raw.get("severity")),
             "start": None,
             "end": None,
@@ -259,6 +287,8 @@ def compute_scores(
         "grammar": correction_score(("grammar", "clarity")),
         "spelling": correction_score(("spelling",)),
         "punctuation": correction_score(("punctuation",)),
+        "readability": correction_score(("readability",)),
+        "style": correction_score(("style",)),
         "consistency": min(
             correction_score(("consistency",)), finding_score(("terminology",))
         ),
@@ -320,7 +350,11 @@ async def run_pipeline(
     text: str,
     progress: ProgressCallback | None = None,
     agent_status: StatusCallback | None = None,
+    document_type: str = "auto",
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    resolved_type = detect_document_type(text, document_type)
+    document_metadata = metadata if isinstance(metadata, dict) else {}
     spans = split_spans(text)
     total = len(spans) + len(DOC_AGENTS) + 2
     completed = 0
@@ -360,6 +394,7 @@ async def run_pipeline(
                         text[start:end],
                         context_before=before,
                         context_after=after,
+                        document_type=resolved_type,
                     )
             except asyncio.CancelledError:
                 raise
@@ -372,8 +407,44 @@ async def run_pipeline(
         async def doc_work(agent: dict[str, str]) -> None:
             await emit_status(agent["key"], agent["label"], "running")
             try:
-                async with semaphore:
-                    result = await run_doc_agent(client, agent, text)
+                if agent.get("engine") == "rules":
+                    result = await asyncio.to_thread(
+                        run_rule_reviewer,
+                        agent["key"],
+                        text,
+                        resolved_type,
+                        document_metadata,
+                    )
+                elif not is_reviewer_applicable(agent["key"], text):
+                    result = {
+                        "findings": [],
+                        "verdict": "Not applicable to this document.",
+                        "failed": False,
+                    }
+                else:
+                    rule_result = (
+                        await asyncio.to_thread(
+                            run_rule_reviewer,
+                            agent["key"],
+                            text,
+                            resolved_type,
+                            document_metadata,
+                        )
+                        if agent.get("engine") == "hybrid"
+                        else None
+                    )
+                    async with semaphore:
+                        review_input = (
+                            f"DOCUMENT TYPE: {resolved_type}\n"
+                            f"FORMAT METADATA: {document_metadata}\n\n"
+                            f"DOCUMENT:\n{text}"
+                        )
+                        result = await run_doc_agent(client, agent, review_input)
+                    if rule_result:
+                        result["findings"] = [
+                            *(rule_result.get("findings") or []),
+                            *(result.get("findings") or []),
+                        ]
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -405,6 +476,22 @@ async def run_pipeline(
                 anchor_changes(text[start:end], result.get("changes") or [], start)
             )
         changes = dedupe_changes(changes)
+        eligible_changes: list[dict[str, Any]] = []
+        prefiltered_changes = 0
+        for change in changes:
+            rejection = is_protected_change(
+                text,
+                change.get("start"),
+                change.get("end"),
+                change["original"],
+                change["corrected"],
+                resolved_type,
+            )
+            if rejection:
+                prefiltered_changes += 1
+                continue
+            eligible_changes.append(change)
+        changes = eligible_changes
 
         findings: list[dict[str, Any]] = []
         for agent in DOC_AGENTS:
@@ -415,17 +502,29 @@ async def run_pipeline(
             for raw in rows:
                 if not isinstance(raw, dict):
                     continue
+                name = str(raw.get("finding") or raw.get("title") or "Finding").strip()
+                evidence = str(raw.get("evidence") or raw.get("location") or "").strip()
+                reason = str(raw.get("reason") or raw.get("detail") or "").strip()
+                context = str(
+                    raw.get("supporting_context") or raw.get("location") or evidence
+                ).strip()
                 findings.append(
                     {
                         "agent": agent["key"],
                         "agent_label": agent["label"],
                         "category": agent["category"],
-                        "title": str(raw.get("title") or "Finding").strip(),
-                        "detail": str(raw.get("detail") or "").strip(),
-                        "location": str(raw.get("location") or "").strip(),
-                        "severity": _normalise_severity(raw.get("severity")),
-                        "verified": None,
+                        "finding": name,
+                        "title": name,
+                        "evidence": evidence,
+                        "rule": str(raw.get("rule") or "").strip(),
                         "confidence": None,
+                        "severity": _normalise_severity(raw.get("severity")),
+                        "reason": reason,
+                        "detail": reason,
+                        "suggested_fix": str(raw.get("suggested_fix") or "").strip(),
+                        "supporting_context": context,
+                        "location": context,
+                        "verified": None,
                     }
                 )
         findings = dedupe_findings(findings)
@@ -439,7 +538,7 @@ async def run_pipeline(
                     "kind": change["category"],
                     "text": (
                         f'Change "{change["original"]}" to "{change["corrected"]}". '
-                        f"{change['reason']}"
+                        f"RULE: {change['rule']}. REASON: {change['reason']}"
                     ),
                     "context": _context_for_span(
                         text, change.get("start"), change.get("end")
@@ -451,7 +550,11 @@ async def run_pipeline(
                 {
                     "id": f"f{index}",
                     "kind": finding["agent"],
-                    "text": f"{finding['title']}: {finding['detail']}",
+                    "text": (
+                        f"{finding['title']}. EVIDENCE: {finding['evidence']}. "
+                        f"RULE: {finding['rule']}. REASON: {finding['reason']}. "
+                        f"FIX: {finding['suggested_fix']}"
+                    ),
                     "context": _context_for_finding(text, finding),
                 }
             )
@@ -469,9 +572,28 @@ async def run_pipeline(
                     continue
                 row["verified"] = verdict.get("keep")
                 row["confidence"] = verdict.get("confidence")
+                threshold = (
+                    0.85
+                    if row.get("category")
+                    in {"style", "readability", "terminology", "consistency"}
+                    else 0.75
+                )
+                if (
+                    row["verified"] is not True
+                    or float(row["confidence"] or 0.0) < threshold
+                ):
+                    row["verified"] = False
                 if verdict.get("note"):
                     row["verifier_note"] = verdict["note"]
         changes = resolve_overlaps(changes)
+        verified_changes = [
+            change for change in changes if change.get("verified") is True
+        ]
+        verified_findings_all = [
+            finding for finding in findings if finding.get("verified") is True
+        ]
+        filtered_changes = len(changes) - len(verified_changes) + prefiltered_changes
+        filtered_findings = len(findings) - len(verified_findings_all)
         await emit_status(
             "verifier",
             "False-positive verification",
@@ -479,11 +601,11 @@ async def run_pipeline(
         )
         await tick()
 
-        stats = build_stats(text, changes, len(spans))
-        scores = compute_scores(changes, findings, stats["words"])
+        stats = build_stats(text, verified_changes, len(spans))
+        scores = compute_scores(verified_changes, verified_findings_all, stats["words"])
         await emit_status("summary", "Executive summary", "running")
         verified_findings = sorted(
-            (finding for finding in findings if finding.get("verified") is True),
+            verified_findings_all,
             key=lambda finding: finding["severity"] != "major",
         )
         try:
@@ -512,6 +634,23 @@ async def run_pipeline(
     report = {
         "agents": [
             {
+                "key": reviewer["key"],
+                "label": reviewer["label"],
+                "status": "failed" if correction_failed else "done",
+                "verdict": (
+                    "Review completed."
+                    if not correction_failed
+                    else "One or more chunks failed."
+                ),
+                "findings": sum(
+                    change["category"] == reviewer["category"]
+                    for change in verified_changes
+                ),
+            }
+            for reviewer in CORRECTION_REVIEWERS
+        ]
+        + [
+            {
                 "key": agent["key"],
                 "label": agent["label"],
                 "status": (
@@ -523,14 +662,16 @@ async def run_pipeline(
                     (agent_results.get(agent["key"]) or {}).get("verdict") or ""
                 ),
                 "findings": sum(
-                    finding["agent"] == agent["key"] for finding in findings
+                    finding["agent"] == agent["key"]
+                    for finding in verified_findings_all
                 ),
             }
             for agent in DOC_AGENTS
         ],
-        "findings": findings,
+        "findings": verified_findings_all,
         "scores": scores,
         "summary": executive_summary,
+        "document_type": resolved_type,
         "iso": {
             "present_sections": [
                 str(section) for section in iso_result.get("present_sections") or []
@@ -540,12 +681,16 @@ async def run_pipeline(
             ],
             "is_sop": bool(iso_result.get("is_sop")),
         },
+        "verification": {
+            "verified_corrections": len(verified_changes),
+            "filtered_corrections": filtered_changes,
+            "verified_findings": len(verified_findings_all),
+            "filtered_findings": filtered_findings,
+        },
     }
     stats["report"] = report
     verified_count = stats["verified_issues"]
-    verified_findings_count = sum(
-        finding.get("verified") is True for finding in findings
-    )
+    verified_findings_count = len(verified_findings_all)
     if not verified_count and not verified_findings_count:
         summary = f"No verified issues found across {stats['words']:,} words."
     else:
@@ -557,8 +702,8 @@ async def run_pipeline(
             f"{stats['words']:,} words. Overall score: {scores['overall']}/100."
         )
     return {
-        "corrected_text": apply_changes(text, changes),
-        "changes": changes,
+        "corrected_text": apply_changes(text, verified_changes),
+        "changes": verified_changes,
         "summary": summary,
         "stats": stats,
     }

@@ -10,16 +10,40 @@ import httpx
 from app.cerebras_client import call_json
 
 FINDING_SCHEMA = """Return ONLY a JSON object:
-{"findings": [{"title": "<short issue>", "detail": "<specific evidence and
-recommendation>", "location": "<verbatim quote or section>", "severity":
-"<minor|major>"}], "verdict": "<one sentence>"}
-Only report demonstrable issues. Empty findings is valid. Never invent issues."""
+{"findings": [{
+  "finding": "<short issue name>",
+  "evidence": "<verbatim evidence from the document>",
+  "rule": "<specific rule or consistency principle>",
+  "severity": "<minor|major>",
+  "reason": "<why the evidence violates the rule>",
+  "suggested_fix": "<precise recommendation, never an automatic rewrite>",
+  "supporting_context": "<section name or short source excerpt>"
+}], "verdict": "<one factual sentence>"}
+Every field is mandatory. Report only issues directly supported by source evidence.
+Empty findings is valid and preferred to speculation. Never invent an issue."""
+
+CORRECTION_REVIEWERS: tuple[dict[str, str], ...] = (
+    {"key": "grammar", "label": "Grammar reviewer", "category": "grammar"},
+    {"key": "spelling", "label": "Spelling reviewer", "category": "spelling"},
+    {
+        "key": "punctuation",
+        "label": "Punctuation reviewer",
+        "category": "punctuation",
+    },
+    {
+        "key": "readability",
+        "label": "Readability reviewer",
+        "category": "readability",
+    },
+    {"key": "style", "label": "Style reviewer", "category": "style"},
+)
 
 DOC_AGENTS: tuple[dict[str, str], ...] = (
     {
         "key": "terminology",
         "label": "Terminology consistency",
         "category": "terminology",
+        "engine": "rules",
         "prompt": """Review the complete document for inconsistent roles, departments,
 systems, products, abbreviations, and defined terms. Flag only variants that clearly
 refer to the same entity, state the evidence, and prefer the dominant form. Flag
@@ -28,19 +52,30 @@ correct and must not be renamed.\n\n"""
         + FINDING_SCHEMA,
     },
     {
-        "key": "structure",
-        "label": "Structure & formatting",
+        "key": "role",
+        "label": "Role consistency",
+        "category": "consistency",
+        "engine": "llm",
+        "prompt": """Compare role names and assigned responsibilities across the
+complete document. Report only direct contradictions or a minority role-name variant
+supported by quotes. Do not assume similar-sounding roles are the same role.\n\n"""
+        + FINDING_SCHEMA,
+    },
+    {
+        "key": "section",
+        "label": "Section consistency",
         "category": "structure",
-        "prompt": """Review heading hierarchy, numbering, list conventions, duplicated
-headings/fragments, visible spacing, markdown syntax, and table column/header
-consistency across the complete document. Do not report sentence-level grammar,
-spelling, or optional style preferences.\n\n"""
+        "engine": "llm",
+        "prompt": """Compare summaries, scope, responsibilities, procedures, records,
+forms, appendices, and revision statements across sections. Report only a direct,
+quoted contradiction or an explicitly promised but absent section.\n\n"""
         + FINDING_SCHEMA,
     },
     {
         "key": "procedure",
-        "label": "Procedure validation",
+        "label": "Procedure consistency",
         "category": "procedure",
+        "engine": "hybrid",
         "prompt": """For an actual procedure/SOP, compare every process representation:
 steps, tables, responsibilities, checklists, and references. Find missing, duplicated,
 misordered, contradictory, or wrongly owned steps and broken references. If the
@@ -48,41 +83,85 @@ document is not procedural, return no findings.\n\n"""
         + FINDING_SCHEMA,
     },
     {
-        "key": "logic",
-        "label": "Flowchart & decision logic",
+        "key": "cross_reference",
+        "label": "Cross-reference reviewer",
+        "category": "structure",
+        "engine": "rules",
+        "prompt": FINDING_SCHEMA,
+    },
+    {
+        "key": "heading",
+        "label": "Heading structure",
+        "category": "structure",
+        "engine": "rules",
+        "prompt": FINDING_SCHEMA,
+    },
+    {
+        "key": "numbering",
+        "label": "Numbering reviewer",
+        "category": "structure",
+        "engine": "rules",
+        "prompt": FINDING_SCHEMA,
+    },
+    {
+        "key": "table",
+        "label": "Table reviewer",
+        "category": "structure",
+        "engine": "rules",
+        "prompt": FINDING_SCHEMA,
+    },
+    {
+        "key": "workflow",
+        "label": "Workflow reviewer",
         "category": "logic",
-        "prompt": """For an actual workflow, verify that decisions have all required
-branches, paths terminate, referenced steps exist, and there are no unreachable,
-duplicated, or endless paths. Do not infer invisible diagram contents. If no workflow
-is described, return no findings.\n\n"""
+        "engine": "llm",
+        "prompt": """For a document that actually defines a workflow, map each written
+step and decision. Report only evidenced dead ends, unreachable steps, uncontrolled
+loops, missing start/end, or mismatches against another written process representation.
+If there is no workflow, return no findings.\n\n"""
+        + FINDING_SCHEMA,
+    },
+    {
+        "key": "flowchart",
+        "label": "Flowchart reviewer",
+        "category": "logic",
+        "engine": "hybrid",
+        "prompt": """Review only flowchart content represented in the supplied text.
+Verify explicit YES and NO branches, start/end nodes, orphan nodes, reachable paths,
+loops with exits, and agreement with written procedure steps. Never claim to inspect
+an image that is not represented in the text. If no textual flowchart exists, return
+no findings.\n\n"""
         + FINDING_SCHEMA,
     },
     {
         "key": "iso",
         "label": "ISO/QMS compliance",
         "category": "iso",
+        "engine": "hybrid",
         "prompt": """Only when the document is clearly controlled SOP/QMS documentation,
 assess Purpose, Scope, Definitions, Responsibilities, Procedure, Records, References,
 Revision History, ownership/approval/effective date, and risk/escalation handling.
 For ordinary prose, do not demand ISO sections.
 
-Return ONLY a JSON object:
-{"findings": [{"title":"...", "detail":"...", "location":"...",
-"severity":"minor|major"}], "present_sections": [], "missing_sections": [],
-"is_sop": true, "verdict": "<one sentence>"}""",
+Also return "present_sections", "missing_sections", and "is_sop" alongside the
+standard finding schema. Missing sections are findings only for a controlled SOP/QMS
+document, never for ordinary prose.\n\n"""
+        + FINDING_SCHEMA,
     },
 )
 
 VERIFIER_PROMPT = """You are the final false-positive verifier. Each proposed item
 contains its own source context. Keep only a demonstrable and useful error.
 
-Reject optional style, speculative claims, duplicates, changes to valid names/code/
-URLs/markdown, claims unsupported by context, or anything that changes meaning.
+Reject optional style, speculative claims, duplicates, changes to valid company
+terminology/product names/glossary entries/code/URLs/file names/table identifiers,
+claims unsupported by context, or anything that changes meaning.
 Keep genuine grammar, spelling, internal inconsistency, structure, procedure, logic,
 and controlled-document defects.
 
 Return ONLY:
 {"items":[{"id":"<exact id>","keep":true,"confidence":0.0,
+"rule_valid":true,"evidence_valid":true,
 "note":"<brief reason when rejected>"}]}
 Return every supplied id exactly once."""
 
@@ -144,7 +223,13 @@ async def run_verifier(
             except (TypeError, ValueError):
                 confidence = 0.5
             keep_value = row.get("keep")
-            keep = keep_value if isinstance(keep_value, bool) else None
+            rule_valid = row.get("rule_valid") is True
+            evidence_valid = row.get("evidence_valid") is True
+            keep = (
+                keep_value
+                if isinstance(keep_value, bool) and rule_valid and evidence_valid
+                else False
+            )
             output[item_id] = {
                 "keep": keep,
                 "confidence": confidence,
@@ -186,9 +271,7 @@ async def run_summary(
             "readability": None,
             "failed": True,
         }
-    risk = str(parsed.get("risk_level") or "").lower()
-    if risk not in {"low", "medium", "high"}:
-        risk = _fallback_risk(scores)
+    risk = _fallback_risk(scores)
     try:
         raw_readability = parsed.get("readability")
         readability = (

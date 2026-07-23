@@ -424,7 +424,7 @@
       <div class="drop-overlay">Drop file to load &mdash; .txt / .md / .docx</div>
       <div class="editor-toolbar">
         <button id="uploadBtn" title="Upload a .txt, .md, or .docx file">&#8613; Upload file</button>
-        <input type="file" id="fileInput" accept=".txt,.md,.docx">
+        <input type="file" id="fileInput" accept=".txt,.md,.docx,.html,.htm,.pdf">
         <button id="sampleBtn" title="Load a sample paragraph with deliberate errors">Try a sample</button>
         <span class="spacer"></span>
         <button id="clearBtn" class="danger" title="Clear the text" style="display:none;">&#10005; Clear</button>
@@ -552,7 +552,9 @@ function fmtDate(iso){
 const wordCount = s => (s.match(/[\w'’-]+/g) || []).length;
 
 /* ---------------- state ---------------- */
-const CATEGORIES = ['grammar','spelling','punctuation','clarity','consistency'];
+const CATEGORIES = [
+  'grammar','spelling','punctuation','clarity','readability','style','consistency'
+];
 let state = null;        // { original, title, changes[], stats, summary, id }
 let view = 'markup';
 let filterCat = 'all';
@@ -562,6 +564,8 @@ const input = $('input'), counts = $('counts'), inputError = $('inputError');
 const submitBtn = $('submitBtn'), clearBtn = $('clearBtn');
 const MAX_CHARS = input.maxLength;
 let loadedFilename = null;
+let loadedDocumentType = 'auto';
+let loadedMetadata = {};
 
 function refreshCounts(){
   const t = input.value;
@@ -570,14 +574,18 @@ function refreshCounts(){
     `<span class="${over?'over':''}">${t.length.toLocaleString('en-GB')} / ${MAX_CHARS.toLocaleString('en-GB')} characters</span>`;
   clearBtn.style.display = t ? '' : 'none';
 }
-input.addEventListener('input', () => { loadedFilename = null; refreshCounts(); hideError(); });
+input.addEventListener('input', () => {
+  loadedFilename = null; loadedDocumentType = 'auto'; loadedMetadata = {};
+  refreshCounts(); hideError();
+});
 refreshCounts();
 
 function showError(msg){ inputError.textContent = msg; inputError.style.display = 'block'; }
 function hideError(){ inputError.style.display = 'none'; }
 
 clearBtn.addEventListener('click', () => {
-  input.value = ''; loadedFilename = null; refreshCounts(); hideError(); input.focus();
+  input.value = ''; loadedFilename = null; loadedDocumentType = 'auto';
+  loadedMetadata = {}; refreshCounts(); hideError(); input.focus();
 });
 
 const SAMPLE = `Their going to love the new proposal, wich we have wrote over the last too weeks. Each of the team members have reviewed it seperately, and no one have raised any concern's.
@@ -586,7 +594,8 @@ The proposal recieve alot of positive feedback allready. Its main strenght is it
 
 Between you and I, the biggest risk are the timeline. If the client want changes, we will loose atleast two weeks, an the launch date will effected.`;
 $('sampleBtn').addEventListener('click', () => {
-  input.value = SAMPLE; loadedFilename = null; refreshCounts(); hideError(); input.focus();
+  input.value = SAMPLE; loadedFilename = null; loadedDocumentType = 'txt';
+  loadedMetadata = {}; refreshCounts(); hideError(); input.focus();
 });
 
 /* -------- file upload + drag & drop -------- */
@@ -611,8 +620,8 @@ card.addEventListener('drop', e => {
 async function loadFile(file){
   hideError();
   const name = file.name.toLowerCase();
-  if(!/\.(txt|md|docx)$/.test(name)){
-    showError('Unsupported file type. Upload a .txt, .md, or .docx file.'); return;
+  if(!/\.(txt|md|docx|html|htm|pdf)$/.test(name)){
+    showError('Unsupported file type. Upload TXT, Markdown, DOCX, HTML, or PDF.'); return;
   }
   try{
     const fd = new FormData(); fd.append('file', file);
@@ -621,6 +630,8 @@ async function loadFile(file){
     if(!res.ok) throw new Error(data.detail || 'Could not read the file.');
     input.value = data.text.slice(0, MAX_CHARS);
     loadedFilename = data.filename;
+    loadedDocumentType = data.document_type || 'auto';
+    loadedMetadata = data.metadata || {};
     refreshCounts();
     toast(`Loaded ${data.filename}.`);
   }catch(err){ showError(err.message); }
@@ -676,7 +687,9 @@ async function streamProofread(text, signal){
   try{
     res = await fetch('/proofread/stream', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({text}), signal
+      body: JSON.stringify({
+        text, document_type: loadedDocumentType, metadata: loadedMetadata
+      }), signal
     });
   }catch(err){
     if(err.name === 'AbortError') throw err;
@@ -744,7 +757,9 @@ function upsertAgent(ev){
 async function plainProofread(text, signal){
   const res = await fetch('/proofread', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({text}), signal
+    body: JSON.stringify({
+      text, document_type: loadedDocumentType, metadata: loadedMetadata
+    }), signal
   });
   const data = await res.json().catch(() => ({}));
   if(!res.ok) throw new Error(data.detail || 'Request failed.');
@@ -822,7 +837,10 @@ function cleanText(){
 
 function renderAll(){ renderStats(); renderChart(); renderReview(); renderDoc(); renderChanges(); }
 
-const SCORE_ORDER = ['overall','grammar','spelling','punctuation','consistency','structure','procedure','logic','iso'];
+const SCORE_ORDER = [
+  'overall','grammar','spelling','punctuation','readability','style',
+  'consistency','structure','procedure','logic','iso'
+];
 
 function findingRow(f){
   return `
@@ -832,7 +850,11 @@ function findingRow(f){
         <span class="f-title">${escapeHtml(f.title)}</span>
         <span class="cat-chip">${escapeHtml(f.category)}</span>
         ${f.confidence != null ? `<span class="conf">${Math.round(f.confidence*100)}%</span>` : ''}
-        <div class="f-detail">${escapeHtml(f.detail)}${f.location ? ` <em>(${escapeHtml(f.location)})</em>` : ''}
+        <div class="f-detail">${escapeHtml(f.detail)}
+        ${f.evidence ? `<div><strong>Evidence:</strong> ${escapeHtml(f.evidence)}</div>` : ''}
+        ${f.rule ? `<div><strong>Rule:</strong> ${escapeHtml(f.rule)}</div>` : ''}
+        ${f.suggested_fix ? `<div><strong>Suggested fix:</strong> ${escapeHtml(f.suggested_fix)}</div>` : ''}
+        ${f.location ? ` <em>(${escapeHtml(f.location)})</em>` : ''}
         ${f.verifier_note ? `<div class="fail-note">Verifier: ${escapeHtml(f.verifier_note)}</div>` : ''}</div>
       </div>
     </div>`;
@@ -1124,7 +1146,9 @@ $('copyBtn').addEventListener('click', async () => {
   }catch{ toast('Could not copy to clipboard.', true); }
 });
 
-function baseName(){ return (state.title || 'document').replace(/\.(txt|md|docx)$/i, ''); }
+function baseName(){
+  return (state.title || 'document').replace(/\.(txt|md|docx|html|htm|pdf)$/i, '');
+}
 function downloadBlob(content, filename, type){
   const blob = content instanceof Blob ? content : new Blob([content], {type: type || 'text/plain;charset=utf-8'});
   const a = document.createElement('a');

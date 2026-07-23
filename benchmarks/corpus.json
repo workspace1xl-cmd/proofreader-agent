@@ -1,0 +1,47 @@
+[
+  {
+    "id": "business-proofreading",
+    "document_type": "txt",
+    "review_standard": "human copy-edit",
+    "text": "Their going to publish the AcmeFlow Pro update, wich the team have wrote carefully. Product details remain at https://example.com/acmeflow.",
+    "expected_text_contains": ["They're going", "which", "has written"],
+    "expected_findings": [],
+    "protected_literals": ["AcmeFlow Pro", "https://example.com/acmeflow"]
+  },
+  {
+    "id": "markdown-structure",
+    "document_type": "markdown",
+    "review_standard": "technical editor",
+    "text": "# Installation\n\n### Advanced setup\n\nRun `deploy --target prod`.\n\nVisit [the guide](https://example.com/guide).\n",
+    "expected_text_contains": [],
+    "expected_findings": ["Skipped heading level"],
+    "protected_literals": ["`deploy --target prod`", "https://example.com/guide"]
+  },
+  {
+    "id": "professional-sop",
+    "document_type": "txt",
+    "review_standard": "professional ISO/QMS auditor",
+    "text": "STANDARD OPERATING PROCEDURE\n\n1. Purpose\nControl release approvals.\n\n2. Scope\nAll production releases.\n\n3. Responsibilities\nThe Release Manager approves releases.\n\n4. Procedure\n1. Developer submits Form QMS-17.\n2. Release Manager asks: Approved?\n3. If YES, deploy the release.\n\n5. Records\nRetain Form QMS-18 for three years.\n\nRevision: R01\nOwner: Quality Manager",
+    "expected_text_contains": [],
+    "expected_findings": ["branch", "form"],
+    "protected_literals": ["Release Manager", "Form QMS-17", "Form QMS-18"]
+  },
+  {
+    "id": "terminology-memory",
+    "document_type": "txt",
+    "review_standard": "document-control reviewer",
+    "text": "The Graphic Design Manager approves artwork. The Graphic Design Manager records approval. The Graphic Design Manager archives the file. The Graphic Design Manager reports monthly. The Design Manager signs the final record.",
+    "expected_text_contains": [],
+    "expected_findings": ["Possible terminology inconsistency"],
+    "protected_literals": ["Graphic Design Manager", "Design Manager"]
+  },
+  {
+    "id": "flowchart-logic",
+    "document_type": "txt",
+    "review_standard": "process engineer",
+    "text": "FLOWCHART\nStart -> Review request -> Complete?\nYES -> Publish\n\nWRITTEN PROCEDURE\n1. Start review.\n2. Check whether the request is complete.\n3. If complete, publish it.\n4. If incomplete, return it to the author.\n5. End.",
+    "expected_text_contains": [],
+    "expected_findings": ["NO branch"],
+    "protected_literals": []
+  }
+]

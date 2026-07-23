@@ -155,6 +155,7 @@ def test_scores_are_deterministic_bounded_and_ignore_unverified() -> None:
     assert first == second
     assert first["grammar"] < 100 and first["logic"] < 100
     assert first["spelling"] == first["punctuation"] == first["iso"] == 100
+    assert first["readability"] == first["style"] == 100
     assert all(0 <= score <= 100 for score in first.values())
 
 
@@ -164,6 +165,7 @@ async def _fake_chunk(
     *,
     context_before: str = "",
     context_after: str = "",
+    document_type: str = "txt",
 ) -> dict[str, Any]:
     await asyncio.sleep(0.001)
     changes = []
@@ -182,7 +184,7 @@ async def _fake_chunk(
 
 async def _fake_agent(client: Any, agent: dict[str, str], text: str) -> dict[str, Any]:
     await asyncio.sleep(0.001)
-    if agent["key"] == "logic":
+    if agent["key"] == "workflow":
         return {
             "findings": [
                 {
@@ -252,6 +254,8 @@ def test_pipeline_integration_progress_merge_and_report(
     assert text[result["changes"][0]["start"] : result["changes"][0]["end"]] == "teh"
     assert report["findings"][0]["verified"] is True
     assert report["summary"]["readability"] == 88
+    assert len(report["agents"]) == 16
+    assert report["document_type"] == "txt"
     assert ("verifier", "done") in statuses
 
 
@@ -269,9 +273,12 @@ def test_pipeline_isolates_agent_and_chunk_failures(
     monkeypatch.setattr(pipeline, "run_doc_agent", broken_agent)
     result = asyncio.run(pipeline.run_pipeline("A valid sentence."))
     assert result["corrected_text"] == "A valid sentence."
-    assert all(
-        agent["status"] == "failed" for agent in result["stats"]["report"]["agents"]
-    )
+    statuses = {
+        agent["key"]: agent["status"] for agent in result["stats"]["report"]["agents"]
+    }
+    assert statuses["grammar"] == "failed"
+    assert statuses["role"] == "failed"
+    assert statuses["heading"] == "done"
 
 
 @pytest.mark.stress
@@ -306,3 +313,87 @@ def test_concurrency_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pipeline, "run_doc_agent", monitored_agent)
     asyncio.run(pipeline.run_pipeline("sentence. " * 5_000))
     assert maximum <= pipeline.PIPELINE_CONCURRENCY
+
+
+def test_pipeline_returns_only_high_confidence_unprotected_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def candidate_chunk(
+        client: Any,
+        text: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return {
+            "failed": False,
+            "changes": [
+                {
+                    "original": "https://example.com",
+                    "corrected": "https://example.org",
+                    "category": "style",
+                },
+                {
+                    "original": "teh",
+                    "corrected": "the",
+                    "category": "spelling",
+                    "rule": "Correct spelling",
+                },
+                {
+                    "original": "very",
+                    "corrected": "extremely",
+                    "category": "style",
+                    "rule": "Optional style",
+                },
+            ],
+        }
+
+    async def confidence_verifier(
+        client: Any,
+        items: list[dict[str, str]],
+        **kwargs: Any,
+    ) -> dict[str, dict[str, Any]]:
+        return {
+            item["id"]: {
+                "keep": True,
+                "confidence": 0.8 if "very" in item["text"] else 0.95,
+                "note": "",
+            }
+            for item in items
+        }
+
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(pipeline, "proofread_chunk", candidate_chunk)
+    monkeypatch.setattr(pipeline, "run_verifier", confidence_verifier)
+    result = asyncio.run(
+        pipeline.run_pipeline(
+            "Visit https://example.com. Fix teh word; it is very long.",
+            document_type="txt",
+        )
+    )
+    assert [change["original"] for change in result["changes"]] == ["teh"]
+    verification = result["stats"]["report"]["verification"]
+    assert verification["verified_corrections"] == 1
+    assert verification["filtered_corrections"] == 2
+
+
+def test_context_helpers_cover_missing_and_located_findings() -> None:
+    text = "A" * 500 + "Target section" + "B" * 500
+    assert pipeline._context_for_span(text, None, None) == ""
+    located = pipeline._context_for_finding(text, {"location": "Target section"})
+    assert "Target section" in located and len(located) < len(text)
+    fallback = pipeline._context_for_finding(text, {"location": "missing"})
+    assert "…" in fallback
+    assert pipeline._context_for_finding("short", {"location": "missing"}) == "short"
+
+
+def test_hybrid_reviewers_merge_rules_with_model_findings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_pipeline(monkeypatch)
+    text = (
+        "STANDARD OPERATING PROCEDURE\nPurpose\nScope\nResponsibilities\n"
+        "Procedure\n1. Use Form QMS-17.\n2. Approve.\n3. Archive.\n"
+        "Records\nRetain Form QMS-18.\nRevision"
+    )
+    result = asyncio.run(pipeline.run_pipeline(text, document_type="txt"))
+    titles = {finding["title"] for finding in result["stats"]["report"]["findings"]}
+    assert "Procedure and records form mismatch" in titles

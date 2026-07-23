@@ -35,8 +35,12 @@ Return ONLY this JSON object:
   "changes": [{
     "original": "<smallest exact verbatim snippet from TARGET>",
     "corrected": "<exact replacement>",
-    "category": "<grammar|spelling|punctuation|clarity|consistency>",
-    "reason": "<brief factual explanation>",
+    "category": "<grammar|spelling|punctuation|clarity|readability|style|consistency>",
+    "evidence": "<exact source evidence>",
+    "rule": "<specific language or consistency rule>",
+    "reason": "<why the evidence violates the rule>",
+    "suggested_fix": "<the exact replacement and why it is minimal>",
+    "supporting_context": "<short surrounding context>",
     "severity": "<minor|major>"
   }],
   "summary": "<one sentence>"
@@ -48,6 +52,8 @@ Rules:
   be reflected in corrected_text.
 - Preserve paragraph breaks, markdown syntax, list markers, tables, code, URLs,
   email addresses, identifiers, product names, headings, and Unicode characters.
+- Apply format rules only for the declared DOCUMENT TYPE. Never apply Markdown
+  heading rules to DOCX, TXT, HTML, or PDF text.
 - Do not alter text inside fenced/inline code, URLs, email addresses, or file paths
   unless it is unmistakably malformed.
 - Do not rename roles, titles, departments, products, headings, or defined terms.
@@ -208,11 +214,13 @@ async def proofread_chunk(
     *,
     context_before: str = "",
     context_after: str = "",
+    document_type: str = "txt",
     attempts: int = 4,
 ) -> dict[str, Any]:
     """Proofread a target chunk with read-only boundary context."""
 
     user = (
+        f"DOCUMENT TYPE: {document_type}\n\n"
         f"CONTEXT BEFORE (read-only):\n{context_before}\n\n"
         f"TARGET:\n{text}\n\n"
         f"CONTEXT AFTER (read-only):\n{context_after}"

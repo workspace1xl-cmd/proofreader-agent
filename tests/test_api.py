@@ -30,7 +30,7 @@ def _result(text: str) -> dict[str, Any]:
 def test_health_root_and_static(client: TestClient) -> None:
     health = client.get("/health")
     assert health.status_code == 200
-    assert health.json()["version"] == "2.0.0"
+    assert health.json()["version"] == "3.0.0"
     assert client.get("/").status_code == 200
     assert client.head("/").status_code == 200
     assert client.get("/static/index.html").status_code == 200
@@ -49,25 +49,44 @@ def test_proofread_rejects_oversize(client: TestClient) -> None:
 def test_plain_proofread_and_history(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    received: dict[str, Any] = {}
+
     async def fake(
-        text: str, progress: Any = None, status: Any = None
+        text: str,
+        progress: Any = None,
+        status: Any = None,
+        document_type: str = "auto",
+        metadata: Any = None,
     ) -> dict[str, Any]:
+        received.update({"type": document_type, "metadata": metadata})
         return _result(text)
 
     monkeypatch.setattr(main, "run_pipeline", fake)
-    response = client.post("/proofread", json={"text": "Hello world."})
+    response = client.post(
+        "/proofread",
+        json={
+            "text": "Hello world.",
+            "document_type": "docx",
+            "metadata": {"headings": []},
+        },
+    )
     assert response.status_code == 200
     job_id = response.json()["id"]
     assert client.get(f"/jobs/{job_id}").json()["original_text"] == "Hello world."
     assert client.get("/jobs?limit=1").json()[0]["id"] == job_id
     assert client.get("/jobs/not-found").status_code == 404
+    assert received == {"type": "docx", "metadata": {"headings": []}}
 
 
 def test_streaming_progress_result_and_headers(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def fake(
-        text: str, progress: Any = None, status: Any = None
+        text: str,
+        progress: Any = None,
+        status: Any = None,
+        document_type: str = "auto",
+        metadata: Any = None,
     ) -> dict[str, Any]:
         await progress(0, 1)
         await status("corrections", "Corrections", "running")
@@ -130,11 +149,12 @@ def test_text_markdown_and_unicode_extraction(client: TestClient) -> None:
         response = client.post("/extract", files={"file": (filename, content)})
         assert response.status_code == 200
         assert "\ufeff" not in response.json()["text"]
+        assert response.json()["document_type"] in {"txt", "markdown"}
 
 
 def test_docx_extraction_preserves_paragraph_table_order(client: TestClient) -> None:
     document = Document()
-    document.add_paragraph("First 😀")
+    document.add_heading("First 😀", level=1)
     table = document.add_table(rows=1, cols=2)
     table.cell(0, 0).text = "A"
     table.cell(0, 1).text = "B"
@@ -147,6 +167,66 @@ def test_docx_extraction_preserves_paragraph_table_order(client: TestClient) -> 
     )
     assert response.status_code == 200
     assert response.json()["text"] == "First 😀\n\n| A | B |\n\nLast"
+    assert response.json()["document_type"] == "docx"
+    assert response.json()["metadata"]["headings"][0]["level"] == 1
+    assert response.json()["metadata"]["tables"][0]["column_counts"] == [2]
+
+
+def test_html_extraction_is_structured_and_ignores_scripts(client: TestClient) -> None:
+    html = b"""
+    <html><body><h1>Policy</h1><p>Useful text.</p>
+    <script>ignore me</script><table><tr><td>A</td><td>B</td></tr></table>
+    </body></html>
+    """
+    response = client.post("/extract", files={"file": ("policy.html", html)})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["document_type"] == "html"
+    assert payload["text"] == "Policy\n\nUseful text.\n\nA | B"
+    assert "ignore me" not in payload["text"]
+    assert payload["metadata"]["headings"][0]["level"] == 1
+
+
+def test_pdf_extractor_page_limit_and_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pypdf
+
+    class Page:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class Reader:
+        def __init__(self, source: Any) -> None:
+            self.pages = [Page("Page one"), Page("Page two")]
+
+    monkeypatch.setattr(pypdf, "PdfReader", Reader)
+    text, metadata = main._extract_pdf(b"fake")
+    assert text == "Page one\n\nPage two"
+    assert metadata == {"pages": 2}
+
+    class LongReader:
+        def __init__(self, source: Any) -> None:
+            self.pages = [Page("x")] * 201
+
+    monkeypatch.setattr(pypdf, "PdfReader", LongReader)
+    with pytest.raises(ValueError, match="too many pages"):
+        main._extract_pdf(b"fake")
+
+
+def test_pdf_and_html_extraction_errors_are_sanitized(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(data: bytes) -> tuple[str, dict[str, Any]]:
+        raise ValueError("internal parser detail")
+
+    monkeypatch.setattr(main, "_extract_pdf", broken)
+    monkeypatch.setattr(main, "_extract_html", broken)
+    assert client.post("/extract", files={"file": ("x.pdf", b"x")}).status_code == 400
+    assert client.post("/extract", files={"file": ("x.html", b"x")}).status_code == 400
 
 
 @pytest.mark.parametrize(
@@ -180,6 +260,20 @@ def test_upload_size_and_extension_validation(client: TestClient) -> None:
         client.post("/extract", files={"file": ("sample.pdf", b"%PDF")}).status_code
         == 400
     )
+
+
+def test_docx_archive_resource_limits(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = Document()
+    document.add_paragraph("Text")
+    buffer = io.BytesIO()
+    document.save(buffer)
+    monkeypatch.setattr(main, "MAX_DOCX_ENTRIES", 0)
+    response = client.post(
+        "/extract", files={"file": ("limited.docx", buffer.getvalue())}
+    )
+    assert response.status_code == 400
 
 
 def test_docx_export_is_readable_and_sanitizes_filename(client: TestClient) -> None:

@@ -4,6 +4,9 @@ addopts = "-ra --strict-markers"
 markers = [
   "stress: bounded stress and maximum-size document tests",
 ]
+filterwarnings = [
+  "ignore:Using `httpx` with `starlette.testclient` is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 target-version = "py312"
@@ -20,6 +23,13 @@ no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 exclude = ["tests"]
+
+[tool.coverage.run]
+source = ["app"]
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
 
 [[tool.mypy.overrides]]
 module = ["supabase", "docx.*"]
