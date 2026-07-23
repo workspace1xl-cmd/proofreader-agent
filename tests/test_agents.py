@@ -67,6 +67,40 @@ def test_verifier_does_not_coerce_string_boolean(
     assert result["c0"]["confidence"] == 0.7
 
 
+def test_verifier_accepts_legacy_keep_without_redundant_validity_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_call(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"items": [{"id": "c0", "keep": True, "confidence": 0.96}]}
+
+    monkeypatch.setattr(agents, "call_json", fake_call)
+    items = [{"id": "c0", "kind": "grammar", "text": "x", "context": "x"}]
+    result = asyncio.run(agents.run_verifier(object(), items))
+    assert result["c0"]["keep"] is True
+
+
+def test_verifier_explicit_invalidity_overrides_keep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_call(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "items": [
+                {
+                    "id": "c0",
+                    "keep": True,
+                    "confidence": 0.99,
+                    "rule_valid": False,
+                    "evidence_valid": True,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(agents, "call_json", fake_call)
+    items = [{"id": "c0", "kind": "grammar", "text": "x", "context": "x"}]
+    result = asyncio.run(agents.run_verifier(object(), items))
+    assert result["c0"]["keep"] is False
+
+
 def test_verifier_validates_evidence_rule_confidence_and_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
