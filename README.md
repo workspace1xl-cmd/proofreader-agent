@@ -92,6 +92,11 @@ The correction engine suppresses edits inside:
 Terminology variants are advisory findings; they are never automatically
 replaced.
 
+A deliberately small deterministic spelling safety net covers only
+unequivocal, lowercase mistakes such as `teh` → `the`. It prevents verifier
+variance from hiding obvious errors without applying broad dictionary guesses
+to names or terminology.
+
 ## Format awareness
 
 | Format | Extraction and structural behavior |

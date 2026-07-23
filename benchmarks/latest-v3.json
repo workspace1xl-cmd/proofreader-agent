@@ -1,0 +1,98 @@
+{
+  "endpoint": "https://proofreader-agent.onrender.com",
+  "generated_at": "2026-07-23T05:20:26.407900+00:00",
+  "cases": [
+    {
+      "id": "business-proofreading",
+      "review_standard": "human copy-edit",
+      "elapsed_seconds": 62.315,
+      "metrics": {
+        "expected": 3,
+        "true_positives": 2,
+        "false_positives": 1,
+        "false_negatives": 1,
+        "protected_content_changed": [],
+        "correction_recall": 0.6666666666666666,
+        "finding_recall": 1.0
+      },
+      "overall_score": 99,
+      "corrections": 3,
+      "findings": 0
+    },
+    {
+      "id": "markdown-structure",
+      "review_standard": "technical editor",
+      "elapsed_seconds": 61.418,
+      "metrics": {
+        "expected": 1,
+        "true_positives": 1,
+        "false_positives": 0,
+        "false_negatives": 0,
+        "protected_content_changed": [],
+        "correction_recall": 1.0,
+        "finding_recall": 1.0
+      },
+      "overall_score": 100,
+      "corrections": 0,
+      "findings": 1
+    },
+    {
+      "id": "professional-sop",
+      "review_standard": "professional ISO/QMS auditor",
+      "elapsed_seconds": 124.488,
+      "metrics": {
+        "expected": 2,
+        "true_positives": 1,
+        "false_positives": 1,
+        "false_negatives": 1,
+        "protected_content_changed": [],
+        "correction_recall": 1.0,
+        "finding_recall": 0.5
+      },
+      "overall_score": 99,
+      "corrections": 0,
+      "findings": 2
+    },
+    {
+      "id": "terminology-memory",
+      "review_standard": "document-control reviewer",
+      "elapsed_seconds": 92.854,
+      "metrics": {
+        "expected": 1,
+        "true_positives": 1,
+        "false_positives": 1,
+        "false_negatives": 0,
+        "protected_content_changed": [],
+        "correction_recall": 1.0,
+        "finding_recall": 1.0
+      },
+      "overall_score": 100,
+      "corrections": 0,
+      "findings": 2
+    },
+    {
+      "id": "flowchart-logic",
+      "review_standard": "process engineer",
+      "elapsed_seconds": 123.697,
+      "metrics": {
+        "expected": 1,
+        "true_positives": 1,
+        "false_positives": 3,
+        "false_negatives": 0,
+        "protected_content_changed": [],
+        "correction_recall": 1.0,
+        "finding_recall": 1.0
+      },
+      "overall_score": 98,
+      "corrections": 0,
+      "findings": 4
+    }
+  ],
+  "summary": {
+    "cases": 5,
+    "precision": 0.5,
+    "recall": 0.75,
+    "false_positive_rate": 0.5,
+    "mean_processing_seconds": 92.954
+  }
+}

@@ -30,6 +30,7 @@ from app.document_intelligence import (
     is_protected_change,
     is_reviewer_applicable,
     run_rule_reviewer,
+    verify_safe_spelling,
 )
 
 logger = logging.getLogger(__name__)
@@ -577,6 +578,17 @@ async def run_pipeline(
         await emit_status("verifier", "False-positive verification", "running")
         verifier_items: list[dict[str, str]] = []
         for index, change in enumerate(changes):
+            if verify_safe_spelling(
+                change["original"],
+                change["corrected"],
+                change["category"],
+            ):
+                change["verified"] = True
+                change["confidence"] = 0.99
+                change["verifier_note"] = (
+                    "Validated independently against the safe spelling rule set."
+                )
+                continue
             verifier_items.append(
                 {
                     "id": f"c{index}",

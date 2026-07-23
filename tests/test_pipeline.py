@@ -380,6 +380,21 @@ def test_deterministic_findings_survive_external_verifier_failure(
     assert finding["verification_basis"] == "deterministic_rule"
 
 
+def test_safe_spelling_survives_external_verifier_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_pipeline(monkeypatch)
+
+    async def unavailable_verifier(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(pipeline, "run_verifier", unavailable_verifier)
+    result = asyncio.run(pipeline.run_pipeline("Fix teh word."))
+    assert result["corrected_text"] == "Fix the word."
+    assert result["changes"][0]["confidence"] == 0.99
+    assert "safe spelling" in result["changes"][0]["verifier_note"]
+
+
 def test_pipeline_returns_only_high_confidence_unprotected_items(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

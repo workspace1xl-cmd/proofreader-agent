@@ -17,6 +17,15 @@ _REFERENCE = re.compile(
 _CAPITALIZED_PHRASE = re.compile(
     r"\b(?:[A-Z][A-Za-z&/-]*)(?:\s+[A-Z][A-Za-z&/-]*){1,4}\b"
 )
+_SAFE_SPELLING_FIXES = {
+    "adn": "and",
+    "definately": "definitely",
+    "occured": "occurred",
+    "recieve": "receive",
+    "seperate": "separate",
+    "teh": "the",
+    "wich": "which",
+}
 
 
 def detect_document_type(text: str, declared: str = "auto") -> str:
@@ -96,6 +105,17 @@ def is_protected_change(
     if re.match(r"^\s*(?:table|figure|form|record)\s+[\w.-]+\s*:", line, re.I):
         return "Suppressed change to a table, figure, form, or record identifier."
     return None
+
+
+def verify_safe_spelling(original: str, corrected: str, category: str) -> bool:
+    """Verify a deliberately small set of unequivocal spelling corrections."""
+
+    return (
+        category == "spelling"
+        and original.islower()
+        and corrected.islower()
+        and _SAFE_SPELLING_FIXES.get(original) == corrected
+    )
 
 
 def _finding(

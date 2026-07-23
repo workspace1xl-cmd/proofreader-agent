@@ -16,6 +16,7 @@ from app.document_intelligence import (
     review_procedure_consistency,
     review_terminology,
     run_rule_reviewer,
+    verify_safe_spelling,
 )
 
 
@@ -82,6 +83,14 @@ def test_change_suppression_reasons() -> None:
         is_protected_change(text, None, None, "missing", "x", "txt") or ""
     )
     assert is_protected_change(text, 0, 5, "Visit", "Review", "txt") is None
+
+
+def test_safe_spelling_verifier_is_narrow_and_case_sensitive() -> None:
+    assert verify_safe_spelling("teh", "the", "spelling")
+    assert verify_safe_spelling("recieve", "receive", "spelling")
+    assert not verify_safe_spelling("Teh", "The", "spelling")
+    assert not verify_safe_spelling("product", "products", "spelling")
+    assert not verify_safe_spelling("teh", "the", "style")
 
 
 def test_markdown_heading_review_detects_skip_and_duplicate() -> None:
