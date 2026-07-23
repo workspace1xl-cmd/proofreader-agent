@@ -159,6 +159,13 @@ def test_scores_are_deterministic_bounded_and_ignore_unverified() -> None:
     assert all(0 <= score <= 100 for score in first.values())
 
 
+def test_confidence_thresholds_are_stricter_for_subjective_categories() -> None:
+    assert pipeline._CONFIDENCE_THRESHOLDS["grammar"] == 0.65
+    assert pipeline._CONFIDENCE_THRESHOLDS["spelling"] == 0.65
+    assert pipeline._CONFIDENCE_THRESHOLDS["style"] == 0.85
+    assert pipeline._CONFIDENCE_THRESHOLDS["consistency"] == 0.85
+
+
 async def _fake_chunk(
     client: Any,
     text: str,

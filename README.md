@@ -74,10 +74,11 @@ Every document-level candidate carries:
 - supporting context
 
 The final verifier independently validates both the evidence and the rule.
-Grammar, spelling, punctuation, structure, procedure, logic, and ISO findings
-need confidence of at least 0.75. Style, readability, terminology, and
-consistency findings need at least 0.85. Items below threshold, omitted verifier
-items, and unanchored corrections are not returned as findings or corrections.
+Objective grammar, spelling, and punctuation corrections need confidence of at
+least 0.65. Structure, procedure, logic, ISO, and clarity findings need at least
+0.75. Style, readability, terminology, and consistency findings need at least
+0.85. Items below threshold, omitted verifier items, and unanchored corrections
+are not returned as findings or corrections.
 
 The correction engine suppresses edits inside:
 

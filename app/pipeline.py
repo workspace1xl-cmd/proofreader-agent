@@ -58,6 +58,15 @@ _SCORE_WEIGHTS = {
     "logic": 0.10,
     "iso": 0.10,
 }
+_CONFIDENCE_THRESHOLDS = {
+    "grammar": 0.65,
+    "spelling": 0.65,
+    "punctuation": 0.65,
+    "style": 0.85,
+    "readability": 0.85,
+    "terminology": 0.85,
+    "consistency": 0.85,
+}
 _MODEL_SEMAPHORES: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop, asyncio.Semaphore
 ] = weakref.WeakKeyDictionary()
@@ -615,12 +624,7 @@ async def run_pipeline(
                     continue
                 row["verified"] = verdict.get("keep")
                 row["confidence"] = verdict.get("confidence")
-                threshold = (
-                    0.85
-                    if row.get("category")
-                    in {"style", "readability", "terminology", "consistency"}
-                    else 0.75
-                )
+                threshold = _CONFIDENCE_THRESHOLDS.get(str(row.get("category")), 0.75)
                 if (
                     row["verified"] is not True
                     or float(row["confidence"] or 0.0) < threshold
