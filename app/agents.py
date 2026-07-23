@@ -161,7 +161,6 @@ and controlled-document defects.
 
 Return ONLY:
 {"items":[{"id":"<exact id>","keep":true,"confidence":0.0,
-"rule_valid":true,"evidence_valid":true,
 "note":"<brief reason when rejected>"}]}
 Return every supplied id exactly once."""
 
@@ -223,13 +222,7 @@ async def run_verifier(
             except (TypeError, ValueError):
                 confidence = 0.5
             keep_value = row.get("keep")
-            rule_valid = row.get("rule_valid", keep_value) is True
-            evidence_valid = row.get("evidence_valid", keep_value) is True
-            keep = (
-                keep_value
-                if isinstance(keep_value, bool) and rule_valid and evidence_valid
-                else False
-            )
+            keep = keep_value if isinstance(keep_value, bool) else False
             output[item_id] = {
                 "keep": keep,
                 "confidence": confidence,
