@@ -31,6 +31,7 @@ def test_health_root_and_static(client: TestClient) -> None:
     health = client.get("/health")
     assert health.status_code == 200
     assert health.json()["version"] == "3.0.0"
+    assert health.json()["commit"] == "local"
     assert client.get("/").status_code == 200
     assert client.head("/").status_code == 200
     assert client.get("/static/index.html").status_code == 200

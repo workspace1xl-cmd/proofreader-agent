@@ -135,7 +135,7 @@ deterministic overall score; the summary model cannot override it.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Version, model, storage mode, and limits |
+| `GET` | `/health` | Version, deployed commit, model, storage mode, and limits |
 | `POST` | `/proofread` | Complete JSON review |
 | `POST` | `/proofread/stream` | SSE progress and final result |
 | `POST` | `/extract` | Extract TXT, Markdown, DOCX, HTML, or PDF |

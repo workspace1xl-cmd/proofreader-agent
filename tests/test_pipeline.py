@@ -315,6 +315,64 @@ def test_concurrency_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     assert maximum <= pipeline.PIPELINE_CONCURRENCY
 
 
+def test_concurrency_limit_is_shared_across_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = 0
+    maximum = 0
+
+    async def monitored_chunk(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {"changes": [], "failed": False}
+
+    async def monitored_agent(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {"findings": [], "verdict": "Clean", "failed": False}
+
+    _patch_pipeline(monkeypatch)
+    monkeypatch.setattr(pipeline, "proofread_chunk", monitored_chunk)
+    monkeypatch.setattr(pipeline, "run_doc_agent", monitored_agent)
+
+    async def exercise() -> None:
+        await asyncio.gather(
+            pipeline.run_pipeline("sentence. " * 3_000),
+            pipeline.run_pipeline("sentence. " * 3_000),
+        )
+
+    asyncio.run(exercise())
+    assert maximum <= pipeline.PIPELINE_CONCURRENCY
+
+
+def test_deterministic_findings_survive_external_verifier_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_pipeline(monkeypatch)
+
+    async def unavailable_verifier(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(pipeline, "run_verifier", unavailable_verifier)
+    result = asyncio.run(
+        pipeline.run_pipeline(
+            "# Title\n\n### Skipped\n",
+            document_type="markdown",
+        )
+    )
+    finding = result["stats"]["report"]["findings"][0]
+    assert finding["title"] == "Skipped heading level"
+    assert finding["verified"] is True
+    assert finding["confidence"] == 0.98
+    assert finding["verification_basis"] == "deterministic_rule"
+
+
 def test_pipeline_returns_only_high_confidence_unprotected_items(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

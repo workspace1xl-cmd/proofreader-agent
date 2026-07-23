@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 import re
 import zipfile
 from contextlib import suppress
@@ -92,6 +93,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "version": app.version,
+        "commit": os.environ.get("RENDER_GIT_COMMIT", "local"),
         "model": MODEL,
         "storage": storage_mode(),
         "cerebras_key_configured": bool(CEREBRAS_API_KEY),

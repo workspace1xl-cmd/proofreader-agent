@@ -112,6 +112,7 @@ def _finding(
         "title": name,
         "evidence": evidence,
         "rule": rule,
+        "verification_basis": "deterministic_rule",
         "confidence": None,
         "severity": severity,
         "reason": reason,

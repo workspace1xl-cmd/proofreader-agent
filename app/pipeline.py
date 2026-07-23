@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import weakref
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -57,9 +58,41 @@ _SCORE_WEIGHTS = {
     "logic": 0.10,
     "iso": 0.10,
 }
+_MODEL_SEMAPHORES: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, asyncio.Semaphore
+] = weakref.WeakKeyDictionary()
 
 ProgressCallback = Callable[[int, int], Awaitable[None]]
 StatusCallback = Callable[[str, str, str], Awaitable[None]]
+
+
+def _model_semaphore() -> asyncio.Semaphore:
+    """Share the provider concurrency budget across requests on one event loop."""
+
+    loop = asyncio.get_running_loop()
+    semaphore = _MODEL_SEMAPHORES.get(loop)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(PIPELINE_CONCURRENCY)
+        _MODEL_SEMAPHORES[loop] = semaphore
+    return semaphore
+
+
+def _verify_rule_finding(finding: dict[str, Any]) -> bool:
+    """Independently validate the complete contract of a rule-engine finding."""
+
+    required = (
+        "title",
+        "evidence",
+        "rule",
+        "reason",
+        "suggested_fix",
+        "supporting_context",
+    )
+    return (
+        finding.get("verification_basis") == "deterministic_rule"
+        and finding.get("severity") in {"minor", "major"}
+        and all(str(finding.get(field) or "").strip() for field in required)
+    )
 
 
 def split_spans(text: str) -> list[tuple[int, int]]:
@@ -358,7 +391,7 @@ async def run_pipeline(
     spans = split_spans(text)
     total = len(spans) + len(DOC_AGENTS) + 2
     completed = 0
-    semaphore = asyncio.Semaphore(PIPELINE_CONCURRENCY)
+    semaphore = _model_semaphore()
     chunk_results: list[dict[str, Any] | None] = [None] * len(spans)
     agent_results: dict[str, dict[str, Any]] = {}
 
@@ -513,6 +546,9 @@ async def run_pipeline(
                         "agent": agent["key"],
                         "agent_label": agent["label"],
                         "category": agent["category"],
+                        "verification_basis": str(
+                            raw.get("verification_basis") or "model"
+                        ),
                         "finding": name,
                         "title": name,
                         "evidence": evidence,
@@ -546,6 +582,13 @@ async def run_pipeline(
                 }
             )
         for index, finding in enumerate(findings):
+            if _verify_rule_finding(finding):
+                finding["verified"] = True
+                finding["confidence"] = 0.98
+                finding["verifier_note"] = (
+                    "Validated independently against the deterministic rule contract."
+                )
+                continue
             verifier_items.append(
                 {
                     "id": f"f{index}",
